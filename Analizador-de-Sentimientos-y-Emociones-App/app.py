@@ -908,84 +908,248 @@ def img_to_base64(img_path):
 def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="informe_AS-EC.pdf"):
     try:
         from reportlab.lib.pagesizes import A4
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
-        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib import colors
         from reportlab.lib.units import inch
+        from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
         import time
         
-        doc = SimpleDocTemplate(output_path, pagesize=A4)
+        # Configurar documento con márgenes más amplios
+        doc = SimpleDocTemplate(output_path, pagesize=A4, 
+                              leftMargin=0.75*inch, rightMargin=0.75*inch,
+                              topMargin=1*inch, bottomMargin=1*inch)
         styles = getSampleStyleSheet()
+        
+        # Crear estilos personalizados
+        title_style = ParagraphStyle('CustomTitle',
+                                   parent=styles['Title'],
+                                   fontSize=24,
+                                   spaceAfter=30,
+                                   textColor=colors.HexColor('#2C3E50'),
+                                   alignment=TA_CENTER)
+        
+        subtitle_style = ParagraphStyle('CustomSubtitle',
+                                      parent=styles['Heading2'],
+                                      fontSize=16,
+                                      textColor=colors.HexColor('#34495E'),
+                                      spaceAfter=20,
+                                      spaceBefore=15)
+        
+        summary_style = ParagraphStyle('Summary',
+                                     parent=styles['Normal'],
+                                     fontSize=11,
+                                     textColor=colors.HexColor('#2C3E50'),
+                                     alignment=TA_JUSTIFY,
+                                     spaceAfter=12)
+        
         story = []
         
-        # Título
-        story.append(Paragraph("Informe de Análisis de Sentimientos", styles['Title']))
+        # PORTADA
+        story.append(Spacer(1, 2*inch))
+        story.append(Paragraph("INFORME DE ANÁLISIS", title_style))
+        story.append(Paragraph("Sentimientos y Emociones en Audio", title_style))
+        story.append(Spacer(1, 1*inch))
+        
+        # Información del reporte
+        info_data = [
+            ["Fecha de generación:", time.strftime('%d/%m/%Y')],
+            ["Hora:", time.strftime('%H:%M')],
+            ["Total de segmentos:", str(len(audioDF))],
+            ["Participantes:", str(len(audioDF['speaker'].unique()))],
+            ["Duración total:", f"{audioDF['duration'].sum():.1f} segundos"]
+        ]
+        
+        info_table = Table(info_data, colWidths=[2.5*inch, 2.5*inch])
+        info_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 11),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ]))
+        
+        story.append(info_table)
+        story.append(PageBreak())
+        
+        # RESUMEN EJECUTIVO
+        story.append(Paragraph("RESUMEN EJECUTIVO", subtitle_style))
+        
+        # Calcular estadísticas clave
+        total_duracion = audioDF['duration'].sum()
+        participantes = audioDF['speaker'].unique()
+        sentiment_dist = audioDF.groupby('sentimiento')['duration'].sum()
+        emotion_dist = audioDF.groupby('emocion')['duration'].sum()
+        
+        # Participante más activo
+        speaker_time = audioDF.groupby('speaker')['duration'].sum()
+        most_active = speaker_time.idxmax()
+        most_active_pct = (speaker_time.max() / total_duracion) * 100
+        
+        # Sentimiento predominante
+        main_sentiment = sentiment_dist.idxmax()
+        main_sentiment_pct = (sentiment_dist.max() / total_duracion) * 100
+        
+        # Emoción predominante
+        main_emotion = emotion_dist.idxmax()
+        main_emotion_pct = (emotion_dist.max() / total_duracion) * 100
+        
+        resumen_text = f"""
+        Este informe presenta el análisis de sentimientos y emociones de una conversación con {len(participantes)} participantes 
+        y una duración total de {total_duracion:.1f} segundos ({total_duracion/60:.1f} minutos).
+        
+        <b>Hallazgos principales:</b><br/>
+        • <b>Participante más activo:</b> {most_active} ({most_active_pct:.1f}% del tiempo total)<br/>
+        • <b>Sentimiento predominante:</b> {main_sentiment} ({main_sentiment_pct:.1f}% del tiempo)<br/>
+        • <b>Emoción predominante:</b> {main_emotion} ({main_emotion_pct:.1f}% del tiempo)<br/>
+        • <b>Total de segmentos analizados:</b> {len(audioDF)}
+        """
+        
+        story.append(Paragraph(resumen_text, summary_style))
         story.append(Spacer(1, 20))
-        story.append(Paragraph(f"Generado: {time.strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
-        story.append(Spacer(1, 30))
         
-        # Tabla de datos (primeras 15 filas para que entre en PDF)
-        story.append(Paragraph("Resumen de Análisis", styles['Heading2']))
-        table_data = [["Participante", "Duración (s)", "Sentimiento", "Emoción"]]
+        # TABLA DETALLADA DE PARTICIPANTES 
+        story.append(Paragraph("ANÁLISIS POR PARTICIPANTE TOTAL", subtitle_style))
         
-        for _, row in audioDF.head(15).iterrows():
-            table_data.append([
-                str(row['speaker'])[:20],
-                f"{row['duration']:.1f}",
-                str(row['sentimiento']),
-                str(row['emocion'])
+        participant_summary = audioDF.groupby('speaker').agg({
+            'duration': ['sum', 'count'],
+            'sentimiento': lambda x: x.value_counts().index[0],  # más frecuente
+            'emocion': lambda x: x.value_counts().index[0]       # más frecuente
+        }).round(1)
+        
+        participant_data = [["Participante", "Tiempo total (s)", "Intervenciones", "Sentimiento Principal", "Emoción Principal"]]
+        
+        for speaker in participant_summary.index:
+            tiempo = participant_summary.loc[speaker, ('duration', 'sum')]
+            intervenciones = participant_summary.loc[speaker, ('duration', 'count')]
+            sentimiento = participant_summary.loc[speaker, ('sentimiento', '<lambda>')]
+            emocion = participant_summary.loc[speaker, ('emocion', '<lambda>')]
+            
+            participant_data.append([
+                str(speaker),
+                f"{tiempo:.1f}",
+                str(intervenciones),
+                str(sentimiento),
+                str(emocion)
             ])
         
-        table = Table(table_data, colWidths=[2*inch, 1*inch, 1.5*inch, 1.5*inch])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+        participant_table = Table(participant_data, colWidths=[1.5*inch, 1*inch, 1*inch, 1.2*inch, 1.2*inch])
+        participant_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3498DB')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('FONTSIZE', (0, 1), (-1, -1), 9),
             ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#ECF0F1')),
+            ('GRID', (0, 0), (-1, -1), 1, colors.white),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ]))
         
-        story.append(table)
-        story.append(Spacer(1, 30))
+        story.append(participant_table)
         
-        # Incluir todos los gráficos disponibles
+        # TABLA DETALLADA DE INTERVENCIONES
+        story.append(Paragraph("ANÁLISIS POR INTERVENCIÓN", subtitle_style))
+
+        intervencion_data = [["# Intervención", "Participante", "Duración (s)", "Sentimiento", "Emoción"]]
+
+        for idx, row in audioDF.iterrows():
+            intervencion_data.append([
+                str(idx + 1),   # número de intervención
+                str(row['speaker']),
+                f"{row['duration']:.1f}",
+                str(row['sentimiento']),
+                str(row['emocion'])
+            ])
+
+        intervencion_table = Table(intervencion_data, colWidths=[1*inch, 1.5*inch, 1*inch, 1.5*inch, 1.5*inch])
+        intervencion_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#27AE60')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('FONTSIZE', (0, 1), (-1, -1), 9),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F9F9F9')),
+            ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+
+        story.append(intervencion_table)
+        story.append(PageBreak())
+
+        # GRÁFICOS ORGANIZADOS
+        story.append(Paragraph("ANÁLISIS VISUAL", subtitle_style))
+        
+        # Organizar gráficos por categorías
+        graficos_organizados = [
+            ("Análisis de Participación", ["duracion_orador.png"]),
+            ("Distribución de Sentimientos", ["sentimiento_total.png", "sentimiento_orador.png"]),
+            ("Distribución de Emociones", ["emocion_total.png", "emocion_orador.png"]),
+            ("Evolución Temporal", ["sentimiento_tiempo.png", "sentimiento_tiempo_speakers.png"]),
+            ("Análisis de Contenido", ["wordcloud.png", "palabras_frecuentes.png"])
+        ]
+        
         chart_titles = {
-            "duracion_orador.png": "Duración por Orador",
-            "sentimiento_orador.png": "Sentimientos por Orador", 
-            "emocion_orador.png": "Emociones por Orador",
-            "sentimiento_total.png": "Distribución Total de Sentimientos",
-            "emocion_total.png": "Distribución Total de Emociones",
+            "duracion_orador.png": "Duración por Participante",
+            "sentimiento_orador.png": "Sentimientos por Participante", 
+            "emocion_orador.png": "Emociones por Participante",
+            "sentimiento_total.png": "Distribución General de Sentimientos",
+            "emocion_total.png": "Distribución General de Emociones",
             "sentimiento_tiempo.png": "Evolución del Sentimiento",
             "sentimiento_tiempo_speakers.png": "Sentimientos por Participante en el Tiempo",
             "wordcloud.png": "Nube de Palabras",
             "palabras_frecuentes.png": "Palabras Más Frecuentes"
         }
-
+        
+        # Crear diccionario de archivos disponibles
+        available_plots = {}
         for plot_file in plot_files:
             if os.path.exists(plot_file):
-                plot_name = os.path.basename(plot_file)
-                title = chart_titles.get(plot_name, plot_name.replace('.png', '').replace('_', ' ').title())
-                
-                story.append(Paragraph(title, styles['Heading3']))
-                try:
-                    img = Image(plot_file, width=4.5*inch, height=2.7*inch)
-                    story.append(img)
-                    story.append(Spacer(1, 15))
-                except Exception as e:
-                    print(f"Error añadiendo {plot_name}: {e}")
-                    story.append(Paragraph(f"[Error cargando gráfico: {plot_name}]", styles['Normal']))
-                    story.append(Spacer(1, 10))
+                filename = os.path.basename(plot_file)
+                available_plots[filename] = plot_file
         
+        for categoria, archivos in graficos_organizados:
+            # Verificar si hay gráficos disponibles en esta categoría
+            archivos_disponibles = [arch for arch in archivos if arch in available_plots]
+            if not archivos_disponibles:
+                continue
+                
+            story.append(Paragraph(categoria, ParagraphStyle('CategoryTitle',
+                                                            parent=styles['Heading3'],
+                                                            fontSize=14,
+                                                            textColor=colors.HexColor('#2980B9'),
+                                                            spaceAfter=15,
+                                                            spaceBefore=20)))
+            
+            for archivo in archivos_disponibles:
+                if archivo in available_plots:
+                    title = chart_titles.get(archivo, archivo.replace('.png', '').replace('_', ' ').title())
+                    
+                    story.append(Paragraph(title, ParagraphStyle('ChartTitle',
+                                                                parent=styles['Heading4'],
+                                                                fontSize=12,
+                                                                textColor=colors.HexColor('#34495E'),
+                                                                spaceAfter=10)))
+                    try:
+                        img = Image(available_plots[archivo], width=5.5*inch, height=3.3*inch)
+                        story.append(img)
+                        story.append(Spacer(1, 20))
+                    except Exception as e:
+                        print(f"Error añadiendo {archivo}: {e}")
+                        story.append(Paragraph(f"[Error cargando gráfico: {title}]", styles['Normal']))
+                        story.append(Spacer(1, 10))
+        
+        # Construir el documento
         doc.build(story)
         return output_path
         
     except Exception as e:
         print(f"Error generando PDF: {e}")
-        return None
-  
+        return None 
+
 def generar_reporte(analysis_data):
     if analysis_data is None:
         return [
@@ -1024,7 +1188,7 @@ def create_audio_analyzer_app():
                 @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&display=swap');
                 .main-title {
                     font-family: 'Open Sans', sans-serif;
-                    font-size: 18px;
+                    font-size: 24px;
                     font-weight: bold;
                     text-transform: uppercase;
                     color: white;
@@ -1124,7 +1288,7 @@ def create_audio_analyzer_app():
         <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
         <div class="step-indicator">
             <div class="step active">1. Carga de Audio</div>
-            <div class="step pending">2. Identificación</div>
+            <div class="step pending">2. Transcripción e Identificación</div>
             <div class="step pending">3. Resultados</div>
         </div>
         """)
@@ -1152,7 +1316,7 @@ def create_audio_analyzer_app():
                         value="es", 
                         label="Idioma principal del audio"
                     )
-                    
+                with gr.Column(scale=1):
                     with gr.Accordion("⚙️ Configuración Avanzada", open=False):
                         remove_stopwords_input = gr.Checkbox(
                             label="Filtrar palabras vacías", 
@@ -1169,7 +1333,7 @@ def create_audio_analyzer_app():
             process_btn = gr.Button(
                 "Procesar Audio", 
                 variant="primary", 
-                size="lg",
+                size="md",
                 scale=2
             )
             
@@ -1188,7 +1352,7 @@ def create_audio_analyzer_app():
         
         # PÁGINA 2: Identificación de Participantes
         with gr.Column(visible=False, elem_classes=["page-container"]) as page2:
-            gr.HTML('<h1 class="page-title">Identificación de Participantes</h1>')
+            gr.HTML('<h1 class="page-title">Transcripción completada</h1>')
             
             with gr.Column():
                 gr.Markdown("### Procesamiento Completado")
@@ -1201,7 +1365,7 @@ def create_audio_analyzer_app():
                     label="Participantes detectados",
                     interactive=False
                 )
-
+            gr.HTML('<h1 class="page-title">Identificación de Participantes</h1>')
             gr.Markdown("""
             ### Escuche las muestras de voz y asigne nombres reales a cada participante
             Esto mejorará significativamente la legibilidad del análisis final.
@@ -1255,24 +1419,33 @@ def create_audio_analyzer_app():
                 
                 with gr.TabItem("Tabla de Análisis"):
                     sentiment_table = gr.DataFrame(
-                        headers=["Participante", "Texto", "Sentimiento", "Emoción", "Confianza"],
+                        headers=["Participante", "Texto Original", "Texto Limpio", "Sentimiento", "Emoción", "Duración", "Confianza"],
                         interactive=False,
                         wrap=True
                     )
                 
                 with gr.TabItem("Gráficos"):
-                    with gr.Row():
-                        plot_duration = gr.Image(label="Duración por Participante", visible=False)
-                        plot_sentiment_dist = gr.Image(label="Distribución de Sentimientos", visible=False)
+                    # Fila 1: Gráficos de duración y sentimientos por orador
+                    with gr.Row(equal_height=True):
+                        plot_duration = gr.Image(label="Duración por Orador", visible=False, height=400)
+                        plot_sentiment_orador = gr.Image(label="Sentimientos por Orador", visible=False, height=400)
+                        plot_emotion_orador = gr.Image(label="Emociones por Orador", visible=False, height=400)
                     
-                    with gr.Row():
-                        plot_emotion_dist = gr.Image(label="Distribución de Emociones", visible=False)
-                        plot_timeline = gr.Image(label="Línea de Tiempo Emocional", visible=False)
+                    # Fila 2: Gráficos de torta (distribuciones totales)
+                    with gr.Row(equal_height=True):
+                        plot_sentiment_dist = gr.Image(label="Distribución Total de Sentimientos", visible=False, height=400)
+                        plot_emotion_dist = gr.Image(label="Distribución Total de Emociones", visible=False, height=400)
                     
-                    with gr.Row():
-                        plot_wordcloud = gr.Image(label="Nube de Palabras", visible=False)
-                        plot_frequency = gr.Image(label="Palabras Más Frecuentes", visible=False)
-            
+                    # Fila 3: Líneas de tiempo
+                    with gr.Row(equal_height=True):
+                        plot_timeline = gr.Image(label="Evolución del Sentimiento", visible=False, height=400)
+                        plot_timeline_speakers = gr.Image(label="Sentimientos por Participante en el Tiempo", visible=False, height=400)
+                    
+                    # Fila 4: Análisis de texto
+                    with gr.Row(equal_height=True):
+                        plot_wordcloud = gr.Image(label="Nube de Palabras", visible=False, height=400)
+                        plot_frequency = gr.Image(label="Palabras Más Frecuentes", visible=False, height=400)
+                            
                 with gr.TabItem("Reporte PDF"):
                     gr.Markdown("### Genere y descargue el reporte del análisis")
                     
@@ -1409,7 +1582,7 @@ def create_audio_analyzer_app():
                 <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
                 <div class="step-indicator">
                     <div class="step completed">1. Carga de Audio</div>
-                    <div class="step active">2. Identificación</div>
+                    <div class="step active">2. Transcripción e Identificación</div>
                     <div class="step pending">3. Resultados</div>
                 </div>
                 """)
@@ -1508,12 +1681,32 @@ def create_audio_analyzer_app():
                 # Preparar tabla de sentimientos
                 for _, row in filtered_audioDF.iterrows():
                     if row['text_clean'].strip():
+                        # Texto original (con stopwords)
+                        texto_original = row['text'][:80] + "..." if len(row['text']) > 80 else row['text']
+                        
+                        # Texto limpio (sin stopwords) 
+                        texto_limpio = row['text_clean'][:80] + "..." if len(row['text_clean']) > 80 else row['text_clean']
+                        
+                        # Duración del segmento
+                        duracion = f"{row['duration']:.1f}s"
+                        
+                        # Confianza (placeholder basado en scores si existen)
+                        confianza = "85%"  # placeholder por defecto
+                        if 'sentimiento_score' in row and row['sentimiento_score']:
+                            try:
+                                max_score = max(row['sentimiento_score'].values())
+                                confianza = f"{max_score*100:.0f}%"
+                            except:
+                                confianza = "85%"
+                        
                         analysis_data["sentiment_data"].append([
                             row['speaker'],
-                            row['text_clean'][:100] + "...",
+                            texto_original,
+                            texto_limpio, 
                             row['sentimiento'],
                             row['emocion'],
-                            "85%"  # placeholder para confianza
+                            duracion,
+                            confianza
                         ])
                 
                 # Resultado final
@@ -1537,21 +1730,40 @@ def create_audio_analyzer_app():
                 gr.Warning("Primero debe completar el análisis")
                 return [
                     gr.update(value=2), gr.update(visible=False), gr.update(visible=True), gr.update(visible=False),
-                    gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+                    gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
                 ]
             
-            # Preparar updates para plots
+            # Mapear archivos PNG específicos a componentes específicos
             plot_files = analysis_data.get("plot_files", [])
-            plot_updates = []
-            for i, plot_file in enumerate(plot_files[:6]):  # máximo 6 plots
-                if os.path.exists(plot_file):
-                    plot_updates.append(gr.update(value=plot_file, visible=True))
-                else:
-                    plot_updates.append(gr.update(visible=False))
             
-            # Rellenar con updates vacíos si faltan plots
-            while len(plot_updates) < 6:
-                plot_updates.append(gr.update(visible=False))
+            # Crear diccionario de archivos por nombre
+            plot_dict = {}
+            for plot_file in plot_files:
+                if os.path.exists(plot_file):
+                    filename = os.path.basename(plot_file)
+                    plot_dict[filename] = plot_file
+            
+            # Mapear cada componente a su archivo correspondiente
+            plot_updates = [
+                # plot_duration
+                gr.update(value=plot_dict.get("duracion_orador.png"), visible="duracion_orador.png" in plot_dict),
+                # plot_sentiment_orador  
+                gr.update(value=plot_dict.get("sentimiento_orador.png"), visible="sentimiento_orador.png" in plot_dict),
+                # plot_emotion_orador
+                gr.update(value=plot_dict.get("emocion_orador.png"), visible="emocion_orador.png" in plot_dict),
+                # plot_sentiment_dist
+                gr.update(value=plot_dict.get("sentimiento_total.png"), visible="sentimiento_total.png" in plot_dict),
+                # plot_emotion_dist
+                gr.update(value=plot_dict.get("emocion_total.png"), visible="emocion_total.png" in plot_dict),
+                # plot_timeline
+                gr.update(value=plot_dict.get("sentimiento_tiempo.png"), visible="sentimiento_tiempo.png" in plot_dict),
+                # plot_timeline_speakers
+                gr.update(value=plot_dict.get("sentimiento_tiempo_speakers.png"), visible="sentimiento_tiempo_speakers.png" in plot_dict),
+                # plot_wordcloud
+                gr.update(value=plot_dict.get("wordcloud.png"), visible="wordcloud.png" in plot_dict),
+                # plot_frequency
+                gr.update(value=plot_dict.get("palabras_frecuentes.png"), visible="palabras_frecuentes.png" in plot_dict)
+            ]
             
             return [
                 gr.update(value=3),  # current_page
@@ -1560,7 +1772,7 @@ def create_audio_analyzer_app():
                     <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
                     <div class="step-indicator">
                     <div class="step completed">1. Carga de Audio</div>
-                    <div class="step completed">2. Identificación</div>
+                    <div class="step completed">2. Transcripción e Identificación</div>
                     <div class="step active">3. Resultados</div>
                 </div>"""),
                 gr.update(value=analysis_data.get("transcript", "")),  # final_transcript
@@ -1578,7 +1790,7 @@ def create_audio_analyzer_app():
                 <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
                 <div class="step-indicator">
                     <div class="step active">1. Carga de Audio</div>
-                    <div class="step pending">2. Identificación</div>
+                    <div class="step pending">2. Transcripción e Identificación</div>
                     <div class="step pending">3. Resultados</div>
                 </div>
                 """),
@@ -1622,8 +1834,10 @@ def create_audio_analyzer_app():
             outputs=[
                 current_page, page1, page2, page3, step_indicator,
                 final_transcript, sentiment_table,
-                plot_duration, plot_sentiment_dist, plot_emotion_dist, 
-                plot_timeline, plot_wordcloud, plot_frequency
+                plot_duration, plot_sentiment_orador, plot_emotion_orador,
+                plot_sentiment_dist, plot_emotion_dist,
+                plot_timeline, plot_timeline_speakers,
+                plot_wordcloud, plot_frequency
             ]
         )
         
@@ -1636,7 +1850,7 @@ def create_audio_analyzer_app():
                 <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
                 <div class="step-indicator">
                     <div class="step active">1. Carga de Audio</div>
-                    <div class="step pending">2. Identificación</div>
+                    <div class="step pending">2. Transcripción e Identificación</div>
                     <div class="step pending">3. Resultados</div>
                 </div>
                 """)
@@ -1652,7 +1866,7 @@ def create_audio_analyzer_app():
                 <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
                 <div class="step-indicator">
                     <div class="step completed">1. Carga de Audio</div>
-                    <div class="step active">2. Identificación</div>
+                    <div class="step active">2. Transcripción e Identificación</div>
                     <div class="step pending">3. Resultados</div>
                 </div>
                 """)

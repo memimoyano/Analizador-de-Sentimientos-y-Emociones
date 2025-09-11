@@ -1,4 +1,11 @@
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-python app.py
+# Crear el entorno virtual (dentro de la carpeta del proyecto)
+python -m venv Analizador-de-Sentimientos-y-Emociones-App/venv
+
+# Activar el entorno
+Analizador-de-Sentimientos-y-Emociones-App\venv\Scripts\activate
+
+# Instalar dependencias
+pip install -r Analizador-de-Sentimientos-y-Emociones-App/requirements.txt
+
+# Ejecutar la app
+python Analizador-de-Sentimientos-y-Emociones-App/app.py
