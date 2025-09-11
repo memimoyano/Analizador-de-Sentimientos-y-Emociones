@@ -1,0 +1,39 @@
+# Core
+torch
+torchaudio
+transformers
+pandas
+numpy
+scikit-learn
+
+# WhisperX y dependencias
+git+https://github.com/m-bain/whisperx.git@v3.3.1
+ctranslate2==4.4.0
+pyannote.audio==3.3.2
+
+# NLP y Sentimientos
+pysentimiento
+nltk
+deep-translator
+wordcloud
+
+# Audio y multimedia
+pydub
+soundfile
+librosa
+imageio-ffmpeg
+
+# Visualización
+matplotlib
+seaborn
+
+# PDF
+reportlab
+pdfkit
+wkhtmltopdf
+
+# UI
+gradio
+
+# Seguridad
+python-dotenv
