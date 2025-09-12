@@ -25,8 +25,12 @@ import seaborn as sns
 from wordcloud import WordCloud
 
 # PDF
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 import base64
 import pdfkit
 
@@ -40,6 +44,9 @@ import time
 
 # Seguridad
 from dotenv import load_dotenv
+
+#Funciones
+import traceback
 
 # Load models
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -474,7 +481,6 @@ def analyze_complementary_english(audioDF, progress=None):
                     progress(progress_val, desc=f"🌐 Procesando texto {count+1}/{total_items}...")
                 
             except Exception as e:
-                import traceback
                 traceback.print_exc()
                 continue
         
@@ -487,7 +493,6 @@ def analyze_complementary_english(audioDF, progress=None):
         if progress:
             progress(0, desc=f"❌ Error en análisis complementario: {str(e)}")
         print(f"Error general en análisis complementario en inglés: {e}")
-        import traceback
         traceback.print_exc()
         return audioDF
 
@@ -679,7 +684,6 @@ def apply_roberta_analysis_and_replace(audioDF, progress=None):
         if progress:
             progress(0, desc=f"❌ Error en análisis Roberta: {str(e)}")
         print(f"Error en apply_roberta_analysis_and_replace: {e}")
-        import traceback
         traceback.print_exc()
         # En caso de error, al menos aplicar el reemplazo básico
         audioDF.loc[audioDF["emocion"] == "others", "emocion"] = "neutral"
@@ -693,8 +697,6 @@ def generate_analysis_plots(audioDF, progress=None):
         progress(0, desc="📊 Iniciando generación de gráficos...")
     
     try:
-        import io
-        import base64
         
         # Traducir las emociones
         df_plot = audioDF.copy()
@@ -726,7 +728,6 @@ def generate_analysis_plots(audioDF, progress=None):
         }
         
         plot_files = []
-        total_plots = 9
         
         # 1. Duración por orador
         if progress:
@@ -905,15 +906,8 @@ def img_to_base64(img_path):
         return base64.b64encode(img_file.read()).decode("utf-8")
 
 # 🔹 Generador del reporte final
-def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="informe_AS-EC.pdf"):
+def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="Informe_AS-EC.pdf"):
     try:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib import colors
-        from reportlab.lib.units import inch
-        from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
-        import time
         
         # Configurar documento con márgenes más amplios
         doc = SimpleDocTemplate(output_path, pagesize=A4, 
@@ -998,6 +992,7 @@ def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="informe_AS-E
         Este informe presenta el análisis de sentimientos y emociones de una conversación con {len(participantes)} participantes 
         y una duración total de {total_duracion:.1f} segundos ({total_duracion/60:.1f} minutos).
         
+        <br/>
         <b>Hallazgos principales:</b><br/>
         • <b>Participante más activo:</b> {most_active} ({most_active_pct:.1f}% del tiempo total)<br/>
         • <b>Sentimiento predominante:</b> {main_sentiment} ({main_sentiment_pct:.1f}% del tiempo)<br/>
@@ -1152,11 +1147,7 @@ def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="informe_AS-E
 
 def generar_reporte(analysis_data):
     if analysis_data is None:
-        return [
-            gr.update(value="❌ No hay datos para generar reporte"),
-            gr.update(visible=False)
-        ]
-    
+        return gr.update(visible=False)
     try:
         audioDF = analysis_data.get("filtered_audioDF")
         plot_files = analysis_data.get("plot_files", [])
@@ -1164,20 +1155,46 @@ def generar_reporte(analysis_data):
         pdf_path = generar_reporte_pdf_reportlab(audioDF, plot_files)
         
         if pdf_path:
-            return [
-                gr.update(value="✅ Reporte PDF generado exitosamente"),
-                gr.update(value=pdf_path, visible=True)
-            ]
+            return gr.update(value=pdf_path, visible=True)
         else:
-            return [
-                gr.update(value="❌ Error generando reporte"),
-                gr.update(visible=False)
-            ]
+            return gr.update(visible=False)
+        
     except Exception as e:
-        return [
-            gr.update(value=f"❌ Error: {str(e)}"),
-            gr.update(visible=False)
-        ]
+        return gr.update(visible=False)
+
+
+def generate_csv_from_analysis(analysis_data):
+    """
+    Genera un archivo CSV con los datos de análisis
+    """
+    if analysis_data is None:
+        return None, gr.update(value="❌ No hay datos para exportar")
+    
+    try:
+        
+        sentiment_data = analysis_data.get("sentiment_data", [])
+        if not sentiment_data:
+            return None, gr.update(value="❌ No hay datos de sentimientos para exportar")
+        
+        # Ruta en la carpeta temporal con nombre fijo
+        file_path = os.path.join(tempfile.gettempdir(), "Tabla_analisis_AS-EC.csv")
+        
+        # Escribir CSV
+        with open(file_path, mode='w', encoding='utf-8', newline='') as f:
+            csv_writer = csv.writer(f, delimiter=',', quotechar='"', quoting=csv.QUOTE_ALL)
+            
+            # Headers
+            headers = ["Participante", "Texto_Original", "Texto_Limpio", "Sentimiento", "Emocion", "Duracion", "Confianza"]
+            csv_writer.writerow(headers)
+            
+            # Datos
+            for row in sentiment_data:
+                csv_writer.writerow(row)
+        
+        return file_path
+        
+    except Exception as e:
+        return None, gr.update(value=f"❌ Error generando CSV: {str(e)}")
 
 def create_audio_analyzer_app():
     with gr.Blocks(theme=gr.themes.Soft(), title="Analizador de Audio Multi-Página") as demo:
@@ -1245,6 +1262,12 @@ def create_audio_analyzer_app():
                 .step.pending {
                     background-color: rgba(255,255,255,0.2);
                 }
+                .btn-primary, button[role="button"].primary {
+                    min-width: 200px !important;
+                    height: 50px !important;
+                    font-size: 16px !important;
+                    font-weight: bold !important;
+                }
                 
                 .tab-nav button, .tabs .tab-nav button, div[role="tablist"] button {
                     color: #fff !important;
@@ -1281,7 +1304,6 @@ def create_audio_analyzer_app():
         audio_data_state = gr.State()
         speakers_data_state = gr.State()
         final_analysis_state = gr.State()
-        plot_files_state = gr.State()
         
         # Indicador de progreso visual
         step_indicator = gr.HTML("""
@@ -1333,8 +1355,7 @@ def create_audio_analyzer_app():
             process_btn = gr.Button(
                 "Procesar Audio", 
                 variant="primary", 
-                size="md",
-                scale=2
+                size="lg"
             )
             
             # Progress bar visible bajo el botón "Procesar Audio" - SOLO UNO
@@ -1418,6 +1439,22 @@ def create_audio_analyzer_app():
                     )
                 
                 with gr.TabItem("Tabla de Análisis"):
+                    gr.Markdown("### Datos detallados del análisis")
+                    
+                    # Botón para descargar CSV
+                    download_csv_btn = gr.Button(
+                        "Descargar Tabla como CSV",
+                        variant="primary",
+                        size="lg"
+                    )
+                    
+                    # Archivo descargable
+                    csv_download_file = gr.File(
+                        label="Descargar CSV",
+                        interactive=True,
+                        visible=False
+                    )
+                    
                     sentiment_table = gr.DataFrame(
                         headers=["Participante", "Texto Original", "Texto Limpio", "Sentimiento", "Emoción", "Duración", "Confianza"],
                         interactive=False,
@@ -1453,12 +1490,6 @@ def create_audio_analyzer_app():
                         "Generar Reporte PDF",
                         variant="primary",
                         size="lg"
-                    )
-
-                    report_status = gr.Textbox(
-                        label="Estado",
-                        interactive=False,
-                        lines=2
                     )
                     
                     report_download = gr.File(
@@ -1544,7 +1575,6 @@ def create_audio_analyzer_app():
         def go_to_page2(audio_data):
             """Navega a página 2 y configura speakers"""
             if audio_data is None:
-                gr.Warning("Primero debe procesar un audio")
                 return [
                     gr.update(value=1),  # current_page
                     gr.update(visible=True), gr.update(visible=False), gr.update(visible=False),
@@ -1730,8 +1760,8 @@ def create_audio_analyzer_app():
                 gr.Warning("Primero debe completar el análisis")
                 return [
                     gr.update(value=2), gr.update(visible=False), gr.update(visible=True), gr.update(visible=False),
-                    gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
-                ]
+                    gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+                    ]
             
             # Mapear archivos PNG específicos a componentes específicos
             plot_files = analysis_data.get("plot_files", [])
@@ -1776,7 +1806,8 @@ def create_audio_analyzer_app():
                     <div class="step active">3. Resultados</div>
                 </div>"""),
                 gr.update(value=analysis_data.get("transcript", "")),  # final_transcript
-                gr.update(value=analysis_data.get("sentiment_data", []))  # sentiment_table
+                gr.update(value=analysis_data.get("sentiment_data", [])),  # sentiment_table
+                gr.update(visible=False)  # csv_download_file (inicialmente oculto)                
             ] + plot_updates
         
         def restart_analysis():
@@ -1833,7 +1864,7 @@ def create_audio_analyzer_app():
             inputs=[final_analysis_state],
             outputs=[
                 current_page, page1, page2, page3, step_indicator,
-                final_transcript, sentiment_table,
+                final_transcript, sentiment_table, csv_download_file,  
                 plot_duration, plot_sentiment_orador, plot_emotion_orador,
                 plot_sentiment_dist, plot_emotion_dist,
                 plot_timeline, plot_timeline_speakers,
@@ -1887,7 +1918,17 @@ def create_audio_analyzer_app():
         generate_report_btn.click(
             fn=generar_reporte,
             inputs=[final_analysis_state],
-            outputs=[report_status, report_download]
+            outputs=[report_download]
+        )
+
+        download_csv_btn.click(
+            fn=generate_csv_from_analysis,
+            inputs=[final_analysis_state],
+            outputs=[csv_download_file]
+        ).then(
+            fn=lambda file_path: gr.update(visible=True) if file_path else gr.update(visible=False),
+            inputs=[csv_download_file],
+            outputs=[csv_download_file]
         )
     
     return demo
