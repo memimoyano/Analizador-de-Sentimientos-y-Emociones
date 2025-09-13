@@ -1,3 +1,0 @@
-Para correr el proyecto hace falta ffmpeg y wkhtmltopdf
-https://www.ffmpeg.org/download.html
-https://wkhtmltopdf.org/downloads.html
