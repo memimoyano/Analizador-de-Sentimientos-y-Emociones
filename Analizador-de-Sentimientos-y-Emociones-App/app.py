@@ -32,7 +32,6 @@ from reportlab.lib import colors
 from reportlab.lib.units import inch
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 import base64
-import pdfkit
 
 # Web app
 import gradio as gr
@@ -54,6 +53,12 @@ compute_type = "float16" if device == "cuda" else "int8"
 whisper_model = whisperx.load_model("small", device, compute_type=compute_type)
 align_model, align_metadata = None, None  # se cargará dinámicamente según idioma
 labels = ["Positive", "Negative", "Neutral"]
+
+current_model_config = {
+    "size": "tiny",
+    "device": device,
+    "compute_type": compute_type
+}
 
 load_dotenv("secrets.env")
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -85,6 +90,138 @@ current_audio_path = None
 
 # Variable global para el idioma
 lenguaje = "es"  # Idioma del audio a analizar
+
+def reload_whisper_model(model_size, progress=gr.Progress()):
+    """
+    Recarga el modelo Whisper con el tamaño especificado
+    """
+    global whisper_model, current_model_config
+    
+    try:
+        progress(0, desc=f"🔄 Cargando modelo {model_size}...")
+        
+        # Limpiar modelo anterior de memoria
+        if whisper_model is not None:
+            del whisper_model
+            whisper_model = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        progress(0.3, desc=f"📥 Descargando modelo {model_size}...")
+        
+        if device == "cuda":
+            comp_type = "float16"
+        else:
+            comp_type = "int8"
+
+        # Cargar nuevo modelo
+        whisper_model = whisperx.load_model(
+            model_size, 
+            device=device, 
+            compute_type=comp_type
+        )
+        
+        # Actualizar configuración global
+        current_model_config.update({
+            "size": model_size,
+            "device": device,
+            "compute_type": comp_type
+        })
+        
+        progress(1.0, desc=f"✅ Modelo {model_size} cargado correctamente")
+        
+        return [
+            gr.update(value=f"✅ Modelo {model_size} cargado correctamente"),
+            gr.update(visible=False)  # Ocultar progress después
+        ]
+        
+    except Exception as e:
+        print(f"Error detallado cargando modelo: {e}")
+        progress(0, desc="❌ Error cargando modelo")
+        
+        # Si falla, intentar recargar el modelo tiny como fallback
+        try:
+            whisper_model = whisperx.load_model("tiny", device=device, compute_type=comp_type)
+            current_model_config.update({
+                "size": "tiny",
+                "device": device,
+                "compute_type": comp_type
+            })
+            return [
+                gr.update(value=f"❌ Error cargando {model_size}. Restaurado a 'tiny': {str(e)}"),
+                gr.update(visible=False)
+            ]
+        except Exception as fallback_error:
+            whisper_model = None
+            return [
+                gr.update(value=f"❌ Error crítico: {str(e)}"),
+                gr.update(visible=False)
+            ]
+
+def get_model_info():
+    """Retorna información del modelo actual"""
+    global current_model_config, whisper_model
+    
+    if whisper_model is None:
+        return "❌ No hay modelo cargado"
+    
+    return (f"Modelo: {current_model_config['size']} | "
+            f"Dispositivo: {current_model_config['device']} | "
+            f"Tipo: {current_model_config['compute_type']}")
+
+def change_model_with_progress(model_size, progress=gr.Progress()):
+    """Cambia el modelo con barra de progreso visible"""
+    
+    try:
+        # Mostrar progress
+        yield [
+            gr.update(visible=True),  # model_progress visible
+            gr.update(value=10, label=f"🔄 Iniciando cambio a {model_size}...", interactive=False),
+            gr.update(value="🔄 Cambiando modelo..."),  # model_status
+            gr.update(value="🔄 Cambiando modelo...")   # current_config_display
+        ]
+        
+        # Cambiar modelo usando la función existente
+        status_updates = reload_whisper_model(model_size, progress)
+
+        updated_info = get_model_info()
+        # Resultado final
+        yield [
+            gr.update(visible=False),  # hide progress
+            gr.update(value=100, label=f"✅ Cambio completado", interactive=False),
+            status_updates[0],  # model_status actualizado
+            gr.update(value=updated_info)  # current_config_display
+        ]
+        
+    except Exception as e:
+        print(f"Error en change_model_with_progress: {e}")
+        yield [
+            gr.update(visible=False),
+            gr.update(value=0, label="❌ Error", interactive=False),
+            gr.update(value=f"❌ Error: {str(e)}"),
+            gr.update(value=get_model_info())
+        ]
+
+def restart_analysis():
+    """Reinicia toda la aplicación"""
+    return [
+        gr.update(value=1),  # current_page
+        gr.update(visible=True),   # page1
+        gr.update(visible=False),  # page2
+        gr.update(visible=False),  # page3
+        gr.update(value="""
+        <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
+        <div class="step-indicator">
+            <div class="step active">1. Carga de Audio</div>
+            <div class="step pending">2. Transcripción e Identificación</div>
+            <div class="step pending">3. Resultados</div>
+        </div>
+        """),
+        gr.update(value=None),  # audio_input
+        gr.update(value=get_model_info()),  # model_status
+        gr.update(value=get_model_info()),  # current_config_display
+        None, None, None  # clear all states
+    ]
 
 def transcribe_with_whisperx_stream(audio_path, num_speakers=None, progress=gr.Progress()):
     """
@@ -220,6 +357,7 @@ def extract_speaker_samples(audioDF, audio_path, min_duration=2.0):
     """
     Extrae muestras de audio de cada speaker para identificación
     ORDENADOS POR PRIMERA APARICIÓN EN EL TIEMPO
+    Versión corregida que incluye TODOS los speakers detectados
     """
     # Cargar el archivo de audio completo
     audio = AudioSegment.from_file(audio_path)
@@ -240,13 +378,17 @@ def extract_speaker_samples(audioDF, audio_path, min_duration=2.0):
         for idx, row in audioDF.iterrows()
     ]
     
-    # Buscar el primer segmento > min_duration segundos por orador EN ORDEN TEMPORAL
+    # Buscar segmentos de audio para cada speaker
     speaker_audio_files = {}
     orators = []
     
-    for speaker in speakers_ordered:  # Procesar en orden temporal
+    for speaker in speakers_ordered:  # Procesar TODOS los speakers
+        print(f"DEBUG: Procesando speaker {speaker}")
+        
+        # Primero intentar encontrar un segmento > min_duration
+        found_good_segment = False
         for idx, spk, start, end, duration in temp_list:
-            if spk == speaker and duration > min_duration and speaker not in speaker_audio_files:
+            if spk == speaker and duration > min_duration:
                 start_ms = int(start * 1000)
                 end_ms = int(end * 1000)
                 segment = audio[start_ms:end_ms]
@@ -256,8 +398,36 @@ def extract_speaker_samples(audioDF, audio_path, min_duration=2.0):
                 segment.export(temp_file, format="wav")
                 speaker_audio_files[speaker] = temp_file
                 orators.append(speaker)
-                break  # Encontramos una muestra válida para este speaker
+                found_good_segment = True
+                print(f"DEBUG: Encontrado segmento largo para {speaker}: {duration:.2f}s")
+                break
+        
+        # Si no encontramos un segmento largo, usar el más largo disponible
+        if not found_good_segment:
+            print(f"DEBUG: No se encontró segmento largo para {speaker}, buscando el más largo...")
+            speaker_segments = [(idx, spk, start, end, duration) 
+                              for idx, spk, start, end, duration in temp_list 
+                              if spk == speaker]
+            
+            if speaker_segments:
+                # Tomar el segmento más largo disponible
+                longest_segment = max(speaker_segments, key=lambda x: x[4])
+                idx, spk, start, end, duration = longest_segment
+                
+                start_ms = int(start * 1000)
+                end_ms = int(end * 1000)
+                segment = audio[start_ms:end_ms]
+                
+                # Crear archivo temporal
+                temp_file = f"temp_segment_{speaker}.wav"
+                segment.export(temp_file, format="wav")
+                speaker_audio_files[speaker] = temp_file
+                orators.append(speaker)
+                print(f"DEBUG: Usando segmento más largo para {speaker}: {duration:.2f}s")
+            else:
+                print(f"WARNING: No se encontraron segmentos para {speaker}")
     
+    print(f"DEBUG: Speakers finales para interfaz: {orators}")
     return orators, speaker_audio_files
 
 def update_speaker_names(audioDF, orator_names):
@@ -1028,7 +1198,7 @@ def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="Informe_AS-E
                 str(emocion)
             ])
         
-        participant_table = Table(participant_data, colWidths=[1.5*inch, 1*inch, 1*inch, 1.2*inch, 1.2*inch])
+        participant_table = Table(participant_data, colWidths=[1.5*inch, 1*inch, 1*inch, 2*inch, 2*inch])
         participant_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3498DB')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
@@ -1049,9 +1219,9 @@ def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="Informe_AS-E
 
         intervencion_data = [["# Intervención", "Participante", "Duración (s)", "Sentimiento", "Emoción"]]
 
-        for idx, row in audioDF.iterrows():
+        for num_intervencion, (_, row) in enumerate(audioDF.iterrows(), start=1):
             intervencion_data.append([
-                str(idx + 1),   # número de intervención
+                str(num_intervencion),  # Numeración secuencial: 1, 2, 3, 4, 5, 6...
                 str(row['speaker']),
                 f"{row['duration']:.1f}",
                 str(row['sentimiento']),
@@ -1202,18 +1372,97 @@ def create_audio_analyzer_app():
         # CSS personalizado para mejor apariencia
         gr.HTML("""
         <style>
-                @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&display=swap');
+                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+                
+                /* Fuentes más legibles para textboxes y inputs */
+                .gr-textbox input, 
+                .gr-textbox textarea,
+                input[type="text"],
+                input[type="number"],
+                textarea,
+                .gr-form input,
+                .gr-form textarea {
+                    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif !important;
+                    font-size: 14px !important;
+                    font-weight: 400 !important;
+                    line-height: 1.5 !important;
+                    color: #2d3748 !important;
+                    background-color: #ffffff !important;
+                }
+                
+                /* Labels más legibles */
+                label, .gr-form label {
+                    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif !important;
+                    font-size: 14px !important;
+                    font-weight: 500 !important;
+                    color: #2d3748 !important;
+                }
+                
+                /* Dropdowns */
+                .gr-dropdown .wrap,
+                .gr-dropdown .wrap-inner,
+                select {
+                    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif !important;
+                    font-size: 14px !important;
+                }
+                
+                /* DataFrames y tablas */
+                .gr-dataframe table,
+                .gr-dataframe th,
+                .gr-dataframe td {
+                    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif !important;
+                    font-size: 13px !important;
+                }
+                
+                /* Código y texto monoespaciado */
+                .gr-code, 
+                pre, 
+                code {
+                    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace !important;
+                    font-size: 13px !important;
+                }
+                
+                /* Botones */
+                button, .gr-button {
+                    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif !important;
+                    font-weight: 500 !important;
+                }
+                
+                /* Mejorar contraste en textboxes */
+                .gr-textbox input:focus,
+                .gr-textbox textarea:focus {
+                    border-color: #4299e1 !important;
+                    box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.1) !important;
+                }
+                
+                /* Placeholder text más legible */
+                .gr-textbox input::placeholder,
+                .gr-textbox textarea::placeholder {
+                    color: #a0aec0 !important;
+                    font-style: italic;
+                }
+                
+                /* Textos de información/ayuda */
+                .gr-form .gr-form-gap .help-text,
+                .gr-textbox .help-text,
+                small {
+                    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif !important;
+                    font-size: 12px !important;
+                    color: #718096 !important;
+                }
+                
+                /* Títulos existentes mantienen su estilo */
                 .main-title {
-                    font-family: 'Open Sans', sans-serif;
+                    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif !important;
                     font-size: 24px;
-                    font-weight: bold;
+                    font-weight: 700;
                     text-transform: uppercase;
                     color: white;
                     text-align: center;
                     margin-bottom: 10px;
                 }
                 .subtitle {
-                    font-family: 'Open Sans', sans-serif;
+                    font-family: 'Inter', sans-serif;
                     font-size: 14px;
                     color: rgba(255,255,255,0.9);
                     text-align: center;
@@ -1231,6 +1480,7 @@ def create_audio_analyzer_app():
                     text-align: center;
                     font-size: 2.5em;
                     margin-bottom: 30px;
+                    font-family: 'Inter', sans-serif !important;
                 }
                 .progress-container {
                     background: rgba(255,255,255,0.1);
@@ -1248,9 +1498,10 @@ def create_audio_analyzer_app():
                     padding: 12px 24px;
                     border-radius: 25px;
                     color: white;
-                    font-weight: bold;
+                    font-weight: 600;
                     min-width: 150px;
                     text-align: center;
+                    font-family: 'Inter', sans-serif !important;
                 }
                 .step.active {
                     background-color: #4CAF50;
@@ -1266,7 +1517,7 @@ def create_audio_analyzer_app():
                     min-width: 200px !important;
                     height: 50px !important;
                     font-size: 16px !important;
-                    font-weight: bold !important;
+                    font-weight: 600 !important;
                 }
                 
                 .tab-nav button, .tabs .tab-nav button, div[role="tablist"] button {
@@ -1274,6 +1525,7 @@ def create_audio_analyzer_app():
                     background-color: rgba(255,255,255,0.2) !important;
                     border: 1px solid rgba(255,255,255,0.3) !important;
                     backdrop-filter: blur(10px);
+                    font-family: 'Inter', sans-serif !important;
                 }
 
                 .tab-nav button[aria-selected="true"], .tabs .tab-nav button[aria-selected="true"], 
@@ -1292,7 +1544,7 @@ def create_audio_analyzer_app():
                 button[role="tab"][aria-selected="true"] {
                     color: #fff !important;
                     background-color: rgba(255,255,255,0.4) !important;
-                    font-weight: bold;
+                    font-weight: 600;
                 }
         </style>
         """)
@@ -1318,7 +1570,6 @@ def create_audio_analyzer_app():
         # PÁGINA 1: Carga de Audio
         with gr.Column(visible=True, elem_classes=["page-container"]) as page1:
             gr.HTML('<h1 class="page-title">Carga y Procesamiento de Audio</h1>')
-            
             with gr.Row():
                 with gr.Column(scale=2):
                     audio_input = gr.Audio(
@@ -1339,6 +1590,54 @@ def create_audio_analyzer_app():
                         label="Idioma principal del audio"
                     )
                 with gr.Column(scale=1):
+                    with gr.Accordion("⚙️ Configuración del Modelo Whisper", open=False):
+                        gr.Markdown("""
+                        ### Selección del modelo de transcripción. Tenga en cuenta que a mayor precisión, mayor necesidad de recursos
+                        - **tiny**: Más rápido, menor precisión
+                        - **base**: Balance velocidad/precisión 
+                        - **small**: Buena precisión
+                        - **medium**: Alta precisión
+                        - **large**: Máxima precisión
+                        """)
+                        
+                        with gr.Row():
+                            model_selector = gr.Dropdown(
+                                choices=[
+                                    ("tiny (rápido, 39MB)", "tiny"),
+                                    ("base (equilibrado, 74MB)", "base"),
+                                    ("small (bueno, 244MB)", "small"), 
+                                    ("medium (alto, 769MB)", "medium"),
+                                    ("large (máximo, 1.5GB)", "large")
+                                ],
+                                value="tiny",
+                                label="Tamaño del modelo",
+                                info="Modelos más grandes = mayor precisión pero más lento"
+                            )
+                            
+                            change_model_btn = gr.Button(
+                                "Cambiar Modelo",
+                                variant="secondary",
+                                size="sm"
+                            )
+                        
+                        model_status = gr.Textbox(
+                            value=get_model_info(),
+                            label="Estado del modelo",
+                            interactive=False,
+                            lines=1
+                        )
+                        
+                        # Progress bar para cambio de modelo
+                        model_progress = gr.Slider(
+                            minimum=0,
+                            maximum=100,
+                            value=0,
+                            step=1,
+                            label="Cargando modelo...",
+                            interactive=False,
+                            show_label=True,
+                            visible=False
+                        )
                     with gr.Accordion("⚙️ Configuración Avanzada", open=False):
                         remove_stopwords_input = gr.Checkbox(
                             label="Filtrar palabras vacías", 
@@ -1350,6 +1649,13 @@ def create_audio_analyzer_app():
                             value=4,
                             minimum=1,
                             maximum=20
+                        )
+
+                        current_config_display = gr.Textbox(
+                            value=get_model_info(),
+                            label="Configuración actual",
+                            interactive=False,
+                            lines=1
                         )
             
             process_btn = gr.Button(
@@ -1392,7 +1698,7 @@ def create_audio_analyzer_app():
             Esto mejorará significativamente la legibilidad del análisis final.
             """)
             
-            # Contenedor dinámico para speakers
+            # Contenedor dinámico para speakers # ACA
             speaker_audio_1 = gr.Audio(label="Muestra Speaker 1", visible=False, interactive=False)
             speaker_name_1 = gr.Textbox(label="Nombre para Speaker 1", visible=False, interactive=True)
             speaker_audio_2 = gr.Audio(label="Muestra Speaker 2", visible=False, interactive=False)  
@@ -1401,7 +1707,8 @@ def create_audio_analyzer_app():
             speaker_name_3 = gr.Textbox(label="Nombre para Speaker 3", visible=False, interactive=True)
             speaker_audio_4 = gr.Audio(label="Muestra Speaker 4", visible=False, interactive=False)
             speaker_name_4 = gr.Textbox(label="Nombre para Speaker 4", visible=False, interactive=True)
-            
+            speaker_audio_5 = gr.Audio(label="Muestra Speaker 4", visible=False, interactive=False)
+            speaker_name_5 = gr.Textbox(label="Nombre para Speaker 4", visible=False, interactive=True)
             with gr.Row():
                 back_to_page1_btn = gr.Button(
                     "⬅️ Volver a Carga de Audio",
@@ -1583,15 +1890,16 @@ def create_audio_analyzer_app():
                     gr.update(visible=False), gr.update(visible=False),  # speaker 1
                     gr.update(visible=False), gr.update(visible=False),  # speaker 2
                     gr.update(visible=False), gr.update(visible=False),  # speaker 3
-                    gr.update(visible=False), gr.update(visible=False)   # speaker 4
+                    gr.update(visible=False), gr.update(visible=False),  # speaker 4
+                    gr.update(visible=False), gr.update(visible=False)   # speaker 5
                 ]
             
             speakers = audio_data.get("speakers", [])
             speaker_files = audio_data.get("speaker_files", {})
             
-            # Configurar updates para cada speaker (máximo 4)
+            # Configurar updates para cada speaker (máximo 5)
             speaker_updates = []
-            for i in range(4):
+            for i in range(5): # ACA
                 if i < len(speakers):
                     speaker = speakers[i]
                     audio_file = speaker_files.get(speaker, None)
@@ -1618,7 +1926,7 @@ def create_audio_analyzer_app():
                 """)
             ] + speaker_updates
         
-        def perform_complete_analysis(audio_data, name1, name2, name3, name4, progress=gr.Progress()):
+        def perform_complete_analysis(audio_data, name1, name2, name3, name4, name5, progress=gr.Progress()):
             """Realiza el análisis completo con barra de progreso visible"""
             global current_audioDF
             
@@ -1643,7 +1951,7 @@ def create_audio_analyzer_app():
                 speakers = audio_data["speakers"]
                 
                 # Crear diccionario de nombres
-                names = [name1, name2, name3, name4]
+                names = [name1, name2, name3, name4, name5]
                 orator_names = {}
                 for i, speaker in enumerate(speakers):
                     if i < len(names) and names[i] and names[i].strip():
@@ -1712,10 +2020,10 @@ def create_audio_analyzer_app():
                 for _, row in filtered_audioDF.iterrows():
                     if row['text_clean'].strip():
                         # Texto original (con stopwords)
-                        texto_original = row['text'][:80] + "..." if len(row['text']) > 80 else row['text']
+                        texto_original = row['text']
                         
                         # Texto limpio (sin stopwords) 
-                        texto_limpio = row['text_clean'][:80] + "..." if len(row['text_clean']) > 80 else row['text_clean']
+                        texto_limpio = row['text_clean']
                         
                         # Duración del segmento
                         duracion = f"{row['duration']:.1f}s"
@@ -1760,7 +2068,8 @@ def create_audio_analyzer_app():
                 gr.Warning("Primero debe completar el análisis")
                 return [
                     gr.update(value=2), gr.update(visible=False), gr.update(visible=True), gr.update(visible=False),
-                    gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+                    gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                    gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update() 
                     ]
             
             # Mapear archivos PNG específicos a componentes específicos
@@ -1810,27 +2119,14 @@ def create_audio_analyzer_app():
                 gr.update(visible=False)  # csv_download_file (inicialmente oculto)                
             ] + plot_updates
         
-        def restart_analysis():
-            """Reinicia toda la aplicación"""
-            return [
-                gr.update(value=1),  # current_page
-                gr.update(visible=True),   # page1
-                gr.update(visible=False),  # page2
-                gr.update(visible=False),  # page3
-                gr.update(value="""
-                <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
-                <div class="step-indicator">
-                    <div class="step active">1. Carga de Audio</div>
-                    <div class="step pending">2. Transcripción e Identificación</div>
-                    <div class="step pending">3. Resultados</div>
-                </div>
-                """),
-                gr.update(value=None),  # audio_input
-                None, None, None  # clear all states
-            ]
-        
         # EVENTOS DE LA APLICACIÓN
         
+        change_model_btn.click(
+            fn=change_model_with_progress,
+            inputs=[model_selector],
+            outputs=[model_progress, model_progress, model_status, current_config_display]
+        )
+
         # Procesar audio con progress bar visible
         process_btn.click(
             fn=process_audio_with_progress,
@@ -1850,14 +2146,15 @@ def create_audio_analyzer_app():
                 speaker_audio_1, speaker_name_1,
                 speaker_audio_2, speaker_name_2, 
                 speaker_audio_3, speaker_name_3,
-                speaker_audio_4, speaker_name_4
+                speaker_audio_4, speaker_name_4,
+                speaker_audio_5, speaker_name_5
             ]
         )
         
         # Realizar análisis completo con progress bar
         analyze_btn.click(
             fn=perform_complete_analysis,
-            inputs=[audio_data_state, speaker_name_1, speaker_name_2, speaker_name_3, speaker_name_4],
+            inputs=[audio_data_state, speaker_name_1, speaker_name_2, speaker_name_3, speaker_name_4, speaker_name_5],
             outputs=[progress2_container, progress2_bar, final_analysis_state]
         ).then(
             fn=go_to_page3,
@@ -1910,6 +2207,7 @@ def create_audio_analyzer_app():
             outputs=[
                 current_page, page1, page2, page3, step_indicator,
                 audio_input,
+                model_status, current_config_display,  # Añadir nuevos componentes
                 audio_data_state, speakers_data_state, final_analysis_state
             ]
         )

@@ -13,3 +13,4 @@ Analizador-de-Sentimientos-y-Emociones-App/wordcloud.png
 Analizador-de-Sentimientos-y-Emociones-App/secrets.env
 Analizador-de-Sentimientos-y-Emociones-App/temp_segment_SPEAKER_00.wav
 Analizador-de-Sentimientos-y-Emociones-App/temp_segment_SPEAKER_01.wav
+*.wav
