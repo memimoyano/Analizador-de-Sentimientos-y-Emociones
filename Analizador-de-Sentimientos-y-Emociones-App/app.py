@@ -3,17 +3,15 @@ import torch
 import whisperx
 import pydub
 from pydub import AudioSegment
-import imageio_ffmpeg as iio_ffmpeg
 import librosa
 
 # NLP y análisis
 import pandas as pd
-import numpy as np
 import re
 import string
 from collections import Counter
 from pysentimiento import create_analyzer
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+from transformers import pipeline
 import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
@@ -35,7 +33,6 @@ import base64
 
 # Web app
 import gradio as gr
-import uuid
 import csv
 import os
 import tempfile
@@ -51,7 +48,7 @@ import traceback
 device = "cuda" if torch.cuda.is_available() else "cpu"
 compute_type = "float16" if device == "cuda" else "int8"
 whisper_model = whisperx.load_model("small", device, compute_type=compute_type)
-align_model, align_metadata = None, None  # se cargará dinámicamente según idioma
+align_model, align_metadata = None, None
 labels = ["Positive", "Negative", "Neutral"]
 
 current_model_config = {
@@ -63,14 +60,11 @@ current_model_config = {
 load_dotenv("secrets.env")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Cargar el modelo roberta-base-go_emotions
 try:
     classifier = pipeline(task="text-classification", model="SamLowe/roberta-base-go_emotions", top_k=None)
-    print("✓ Modelo roberta-base-go_emotions cargado correctamente")
 except Exception as e:
-    print(f"Error cargando modelo roberta: {e}")
+    classifier = None
 
-# Descargas de NLTK
 try:
     nltk.download('punkt', quiet=True)
     nltk.download('punkt_tab', quiet=True)
@@ -78,18 +72,14 @@ try:
 except:
     print("Error descargando recursos NLTK, pero continuando...")
     
-# Stop words
 stop_words = set(stopwords.words('spanish'))
-# Puntuación a eliminar (excepto signos de exclamación/interrogación)
 punctuation_to_strip = set(string.punctuation) | {"«", "»", "…"}
 punctuation_to_strip -= {"¡", "¿", "!", "?"}
 
-# Variable global para almacenar los datos de la transcripción
 current_audioDF = None
 current_audio_path = None
 
-# Variable global para el idioma
-lenguaje = "es"  # Idioma del audio a analizar
+lenguaje = "es"
 
 def reload_whisper_model(model_size, progress=gr.Progress()):
     """
@@ -98,30 +88,27 @@ def reload_whisper_model(model_size, progress=gr.Progress()):
     global whisper_model, current_model_config
     
     try:
-        progress(0, desc=f"🔄 Cargando modelo {model_size}...")
+        progress(0, desc=f"Cargando modelo {model_size}...")
         
-        # Limpiar modelo anterior de memoria
         if whisper_model is not None:
             del whisper_model
             whisper_model = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         
-        progress(0.3, desc=f"📥 Descargando modelo {model_size}...")
+        progress(0.3, desc=f"Descargando modelo {model_size}...")
         
         if device == "cuda":
             comp_type = "float16"
         else:
             comp_type = "int8"
 
-        # Cargar nuevo modelo
         whisper_model = whisperx.load_model(
             model_size, 
             device=device, 
             compute_type=comp_type
         )
         
-        # Actualizar configuración global
         current_model_config.update({
             "size": model_size,
             "device": device,
@@ -132,14 +119,12 @@ def reload_whisper_model(model_size, progress=gr.Progress()):
         
         return [
             gr.update(value=f"✅ Modelo {model_size} cargado correctamente"),
-            gr.update(visible=False)  # Ocultar progress después
+            gr.update(visible=False)
         ]
         
     except Exception as e:
-        print(f"Error detallado cargando modelo: {e}")
         progress(0, desc="❌ Error cargando modelo")
         
-        # Si falla, intentar recargar el modelo tiny como fallback
         try:
             whisper_model = whisperx.load_model("tiny", device=device, compute_type=comp_type)
             current_model_config.update({
@@ -173,28 +158,25 @@ def change_model_with_progress(model_size, progress=gr.Progress()):
     """Cambia el modelo con barra de progreso visible"""
     
     try:
-        # Mostrar progress
         yield [
-            gr.update(visible=True),  # model_progress visible
-            gr.update(value=10, label=f"🔄 Iniciando cambio a {model_size}...", interactive=False),
-            gr.update(value="🔄 Cambiando modelo..."),  # model_status
-            gr.update(value="🔄 Cambiando modelo...")   # current_config_display
+            gr.update(visible=True), 
+            gr.update(value=10, label=f"Iniciando cambio a {model_size}...", interactive=False),
+            gr.update(value="Cambiando modelo..."), 
+            gr.update(value="Cambiando modelo...") 
         ]
         
-        # Cambiar modelo usando la función existente
         status_updates = reload_whisper_model(model_size, progress)
 
         updated_info = get_model_info()
-        # Resultado final
+
         yield [
-            gr.update(visible=False),  # hide progress
+            gr.update(visible=False),
             gr.update(value=100, label=f"✅ Cambio completado", interactive=False),
-            status_updates[0],  # model_status actualizado
-            gr.update(value=updated_info)  # current_config_display
+            status_updates[0],
+            gr.update(value=updated_info)
         ]
         
     except Exception as e:
-        print(f"Error en change_model_with_progress: {e}")
         yield [
             gr.update(visible=False),
             gr.update(value=0, label="❌ Error", interactive=False),
@@ -205,73 +187,66 @@ def change_model_with_progress(model_size, progress=gr.Progress()):
 def restart_analysis():
     """Reinicia toda la aplicación"""
     return [
-        gr.update(value=1),  # current_page
-        gr.update(visible=True),   # page1
-        gr.update(visible=False),  # page2
-        gr.update(visible=False),  # page3
+        gr.update(value=1),
+        gr.update(visible=True), 
+        gr.update(visible=False),
+        gr.update(visible=False), 
         gr.update(value="""
-        <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
+        <div class="main-title"> Analizador de Sentimientos y Emociones en Audio en Español</div>
         <div class="step-indicator">
             <div class="step active">1. Carga de Audio</div>
             <div class="step pending">2. Transcripción e Identificación</div>
             <div class="step pending">3. Resultados</div>
         </div>
         """),
-        gr.update(value=None),  # audio_input
-        gr.update(value=get_model_info()),  # model_status
-        gr.update(value=get_model_info()),  # current_config_display
-        None, None, None  # clear all states
+        gr.update(value=None),
+        gr.update(value=get_model_info()),
+        gr.update(value=get_model_info()),
+        None, None, None
     ]
 
 def transcribe_with_whisperx_stream(audio_path, num_speakers=None, progress=gr.Progress()):
     """
-    Transcripción con progress bar mejorado usando Gradio Progress
+    Transcripción con progress bar usando Gradio Progress
     """
     global align_model, align_metadata, current_audioDF, current_audio_path
     current_audio_path = audio_path
-    progress(0, desc="🚀 Iniciando transcripción...")
+    progress(0, desc="Iniciando transcripción...")
     
     try:
-        # --- 1. Cargar audio ---
-        progress(0.05, desc="📁 Cargando archivo de audio...")
+        progress(0.05, desc="Cargando archivo de audio...")
         audio = whisperx.load_audio(audio_path)
         duration = librosa.get_duration(path=audio_path)
-        chunk_size = 30  # segundos
+        chunk_size = 30
         num_chunks = int(duration // chunk_size) + 1
         partial_segments = []
         transcript_so_far = ""
         
-        # --- 2. Transcribir en chunks ---
-        progress(0.1, desc="🎤 Transcribiendo audio...")
+        progress(0.1, desc="Transcribiendo audio...")
         
         for i in range(num_chunks):
             start = i * chunk_size
             end = min((i + 1) * chunk_size, duration)
             
-            # Transcribir solo ese pedazo
             audio_chunk = audio[int(start * 16000):int(end * 16000)]
             result = whisper_model.transcribe(audio_chunk, batch_size=8)
             
-            # Guardar segmentos
             for seg in result["segments"]:
                 seg["start"] += start
                 seg["end"] += start
                 partial_segments.append(seg)
                 transcript_so_far += f"{seg['text'].strip()} "
                 
-            # Actualizar progreso (0.1 a 0.6 para transcripción)
             chunk_progress = 0.1 + (0.5 * (i + 1) / num_chunks)
             progress(chunk_progress, desc=f"🎤 Transcribiendo segmento {i+1}/{num_chunks}...")
             
-        # --- 3. Alineación ---
-        progress(0.65, desc="🎯 Alineando transcripción...")
+        progress(0.65, desc="Alineando transcripción...")
         
         if align_model is None or result["language"] != getattr(align_metadata, "language_code", None):
             align_model, align_metadata = whisperx.load_align_model(language_code=result["language"], device=device)
         result_aligned = whisperx.align(partial_segments, align_model, align_metadata, audio, device)
         
-        # --- 4. Diarización ---
-        progress(0.8, desc="👥 Identificando hablantes...")
+        progress(0.8, desc="Identificando hablantes...")
         
         diarize_model = whisperx.DiarizationPipeline(use_auth_token=HF_TOKEN, device=device)
         if num_speakers is not None and str(num_speakers).strip() != "":
@@ -280,8 +255,7 @@ def transcribe_with_whisperx_stream(audio_path, num_speakers=None, progress=gr.P
             diarize_segments = diarize_model(audio)
         result_final = whisperx.assign_word_speakers(diarize_segments, result_aligned)
         
-        # --- 5. Guardar transcripción con speakers en archivo ---
-        progress(0.9, desc="💾 Guardando transcripción...")
+        progress(0.9, desc="Guardando transcripción...")
         
         with open("transcription.txt", "w", encoding="utf-8") as file:
             for seg in result_final["segments"]:
@@ -291,8 +265,7 @@ def transcribe_with_whisperx_stream(audio_path, num_speakers=None, progress=gr.P
                     if text:
                         file.write(f"{speaker}: {text}\n")
         
-        # --- 6. Guardar en DataFrame ---
-        progress(0.95, desc="📊 Procesando resultados...")
+        progress(0.95, desc="Procesando resultados...")
         
         audioDF = pd.DataFrame(result_final["segments"])
         current_audioDF = audioDF.copy()
@@ -307,7 +280,7 @@ def transcribe_with_whisperx_stream(audio_path, num_speakers=None, progress=gr.P
 
 def group_consecutive_speakers(audioDF):
     """
-    Groups consecutive speaker segments into single sentences, adjusting 'end' time and 'words'.
+    Agrupa segmentos consecutivos de oradores (speakers) en oraciones únicas, ajustando el tiempo de "fin" y las palabras.
     """
     if not isinstance(audioDF, pd.DataFrame) or \
        not all(col in audioDF.columns for col in ['speaker', 'start', 'end', 'text', 'words']):
@@ -341,7 +314,6 @@ def group_consecutive_speakers(audioDF):
             current_text += " " + text
             current_words.extend(row['words'])
 
-    # Agrega el último segmento
     if current_speaker is not None:
         grouped_segments.append({
             'speaker': current_speaker,
@@ -357,35 +329,26 @@ def extract_speaker_samples(audioDF, audio_path, min_duration=2.0):
     """
     Extrae muestras de audio de cada speaker para identificación
     ORDENADOS POR PRIMERA APARICIÓN EN EL TIEMPO
-    Versión corregida que incluye TODOS los speakers detectados
     """
-    # Cargar el archivo de audio completo
     audio = AudioSegment.from_file(audio_path)
     
-    # Encontrar la primera aparición de cada speaker (ordenado por tiempo)
     first_appearances = {}
     for idx, row in audioDF.iterrows():
         speaker = row['speaker']
         if speaker not in first_appearances:
             first_appearances[speaker] = row['start']
     
-    # Ordenar speakers por primera aparición temporal
     speakers_ordered = sorted(first_appearances.keys(), key=lambda x: first_appearances[x])
     
-    # Crear lista temporal: índice, orador, inicio, fin, duración
     temp_list = [
         (idx, row['speaker'], row['start'], row['end'], row['end'] - row['start'])
         for idx, row in audioDF.iterrows()
     ]
     
-    # Buscar segmentos de audio para cada speaker
     speaker_audio_files = {}
     orators = []
     
-    for speaker in speakers_ordered:  # Procesar TODOS los speakers
-        print(f"DEBUG: Procesando speaker {speaker}")
-        
-        # Primero intentar encontrar un segmento > min_duration
+    for speaker in speakers_ordered:          
         found_good_segment = False
         for idx, spk, start, end, duration in temp_list:
             if spk == speaker and duration > min_duration:
@@ -393,24 +356,19 @@ def extract_speaker_samples(audioDF, audio_path, min_duration=2.0):
                 end_ms = int(end * 1000)
                 segment = audio[start_ms:end_ms]
                 
-                # Crear archivo temporal
                 temp_file = f"temp_segment_{speaker}.wav"
                 segment.export(temp_file, format="wav")
                 speaker_audio_files[speaker] = temp_file
                 orators.append(speaker)
                 found_good_segment = True
-                print(f"DEBUG: Encontrado segmento largo para {speaker}: {duration:.2f}s")
                 break
         
-        # Si no encontramos un segmento largo, usar el más largo disponible
         if not found_good_segment:
-            print(f"DEBUG: No se encontró segmento largo para {speaker}, buscando el más largo...")
             speaker_segments = [(idx, spk, start, end, duration) 
                               for idx, spk, start, end, duration in temp_list 
                               if spk == speaker]
             
             if speaker_segments:
-                # Tomar el segmento más largo disponible
                 longest_segment = max(speaker_segments, key=lambda x: x[4])
                 idx, spk, start, end, duration = longest_segment
                 
@@ -418,16 +376,11 @@ def extract_speaker_samples(audioDF, audio_path, min_duration=2.0):
                 end_ms = int(end * 1000)
                 segment = audio[start_ms:end_ms]
                 
-                # Crear archivo temporal
                 temp_file = f"temp_segment_{speaker}.wav"
                 segment.export(temp_file, format="wav")
                 speaker_audio_files[speaker] = temp_file
                 orators.append(speaker)
-                print(f"DEBUG: Usando segmento más largo para {speaker}: {duration:.2f}s")
-            else:
-                print(f"WARNING: No se encontraron segmentos para {speaker}")
-    
-    print(f"DEBUG: Speakers finales para interfaz: {orators}")
+
     return orators, speaker_audio_files
 
 def update_speaker_names(audioDF, orator_names):
@@ -443,54 +396,51 @@ def update_speaker_names(audioDF, orator_names):
     
     return updated_audioDF
 
-def remove_stopwords_es(text):
-    # Tokenizamos
-    tokens = word_tokenize(text.lower(), language='spanish')
+def remove_stopwords_language(text, language="spanish"):
+    """
+    Remueve stopwords y puntuación innecesaria de un texto dado un idioma.
+    Soporta: 'spanish' y 'english'
+    """
+    stop_words = set(stopwords.words(language))
+    
+    tokens = word_tokenize(text.lower(), language=language)
     cleaned_tokens = []
     
     for token in tokens:
-        # Quitar puntuación innecesaria
         word_clean = token.strip("".join(punctuation_to_strip))
-        # Conservar si no es stopword ni vacío
         if word_clean and word_clean not in stop_words:
             cleaned_tokens.append(word_clean)
     
-    # Reconstruir texto y unir signos sueltos a la palabra anterior
     texto = ' '.join(cleaned_tokens)
-    # Quitar espacios antes de los signos de admiración/interrogación
     texto = re.sub(r'\s+([?!¡¿])', r'\1', texto)
+    
     return texto
 
 def apply_text_filters(audioDF, remove_stopwords=False, min_tokens=4):
     """
     Aplica filtros de texto al DataFrame
     """
-    # Calcular duración
     audioDF['duration'] = audioDF['end'] - audioDF['start']
     
     if remove_stopwords:
-        # Aplicar limpieza de stopwords
-        audioDF["text_clean"] = audioDF["text"].apply(remove_stopwords_es)
-        # Filtrar filas vacías
+        audioDF["text_clean"] = audioDF["text"].apply(remove_stopwords_language)
         audioDF = audioDF[audioDF['text_clean'].str.strip().astype(bool)]
-        # Filtrar por cantidad mínima de tokens
         audioDF = audioDF[audioDF['text_clean'].apply(lambda x: len(str(x).split()) >= min_tokens)]
     else:
-        # Sin limpieza, solo aplicar filtro de tokens mínimos al texto original
-        audioDF["text_clean"] = audioDF["text"]  # Mantener texto original
+        audioDF["text_clean"] = audioDF["text"]
         audioDF = audioDF[audioDF['text'].apply(lambda x: len(str(x).split()) >= min_tokens)]
     
     return audioDF
 
 def analyze_sentiments(audioDF, language="es", progress=None):
     """
-    Analiza sentimientos y emociones del DataFrame usando pysentimiento con progress bar
+    Analiza sentimientos y emociones del DataFrame usando pysentimiento
     """
     global lenguaje
     lenguaje = language
     
     if progress:
-        progress(0, desc="🧠 Iniciando análisis de sentimientos...")
+        progress(0, desc="Iniciando análisis de sentimientos...")
     
     try:
         sentiment_analyzer = create_analyzer(task="sentiment", lang=lenguaje)
@@ -499,36 +449,33 @@ def analyze_sentiments(audioDF, language="es", progress=None):
         total_rows = len(audioDF)
         
         if progress:
-            progress(0.1, desc="🧠 Analizando sentimientos...")
+            progress(0.1, desc="Analizando sentimientos...")
         
-        # Analizar sentimientos con progress
         sentiment_results = []
         for i, text in enumerate(audioDF['text_clean']):
             sentiment_results.append(sentiment_analyzer.predict(text).output)
-            if i % 10 == 0 and progress:  # Update every 10 items
-                progress(0.1 + 0.4 * (i / total_rows), desc=f"🧠 Analizando sentimientos ({i+1}/{total_rows})...")
+            if i % 10 == 0 and progress: 
+                progress(0.1 + 0.4 * (i / total_rows), desc=f"Analizando sentimientos ({i+1}/{total_rows})...")
         
         audioDF['sentimiento'] = sentiment_results
         
         if progress:
-            progress(0.5, desc="😊 Analizando emociones...")
+            progress(0.5, desc="Analizando emociones...")
         
-        # Analizar emociones con progress
         emotion_results = []
         emotion_scores = []
         for i, text in enumerate(audioDF['text_clean']):
             result = emotion_analyzer.predict(text)
             emotion_results.append(result.output)
             emotion_scores.append(result.probas)
-            if i % 10 == 0 and progress:  # Update every 10 items
-                progress(0.5 + 0.4 * (i / total_rows), desc=f"😊 Analizando emociones ({i+1}/{total_rows})...")
+            if i % 10 == 0 and progress:
+                progress(0.5 + 0.4 * (i / total_rows), desc=f"Analizando emociones ({i+1}/{total_rows})...")
         
         audioDF['emocion'] = emotion_results
         audioDF['emocion_score'] = emotion_scores
         
-        # Análisis de scores de sentimientos
         if progress:
-            progress(0.9, desc="📊 Finalizando análisis...")
+            progress(0.9, desc="Finalizando análisis...")
         sentiment_scores = []
         for text in audioDF['text_clean']:
             sentiment_scores.append(sentiment_analyzer.predict(text).probas)
@@ -541,102 +488,67 @@ def analyze_sentiments(audioDF, language="es", progress=None):
     except Exception as e:
         if progress:
             progress(0, desc=f"❌ Error en análisis: {str(e)}")
-        print(f"Error en análisis de sentimientos: {e}")
         return audioDF
 
 def traducir(texto):
+    """
+    Función para traducir texto 
+    """
     try:
         return GoogleTranslator(source='auto', target='en').translate(texto)
     except Exception as e:
-        print(f"Error traduciendo: {texto} -> {e}")
         return None
-
-def remove_stopwords_en(text):
-    # Definir stopwords en inglés
-    stop_words_en = set(stopwords.words('english'))
-    # Puntuación a eliminar (excepto signos de exclamación/interrogación)
-    punctuation_to_strip = set(string.punctuation) | {"«", "»", "…"}
-    punctuation_to_strip -= {"¡", "¿", "!", "?"}
-    
-    # Tokenizamos
-    tokens = word_tokenize(text.lower(), language='english')
-    cleaned_tokens = []
-    
-    for token in tokens:
-        # Quitar puntuación innecesaria
-        word_clean = token.strip("".join(punctuation_to_strip))
-        # Conservar si no es stopword ni vacío
-        if word_clean and word_clean not in stop_words_en:
-            cleaned_tokens.append(word_clean)
-    
-    # Reconstruir texto y unir signos sueltos a la palabra anterior
-    texto = ' '.join(cleaned_tokens)
-    # Quitar espacios antes de los signos de admiración/interrogación
-    texto = re.sub(r'\s+([?!¡¿])', r'\1', texto)
-    return texto
 
 def analyze_complementary_english(audioDF, progress=None):
     """
     Análisis complementario en inglés para frases con emoción 'others' o sentimiento 'NEU'
     """
     if progress:
-        progress(0, desc="🌐 Iniciando análisis complementario en inglés...")
+        progress(0, desc="Iniciando análisis complementario en inglés...")
     
     try:
-        # Hacer una copia para trabajar
         df_work = audioDF.copy()
         
-        # Filtrar casos que necesitan análisis complementario
         mask = (df_work['emocion'] == 'others') | (df_work['sentimiento'] == 'NEU')
         
         if not mask.any():
             if progress:
                 progress(1.0, desc="✅ No se requiere análisis complementario")
-            print("No hay frases que requieran análisis complementario en inglés")
             return audioDF
         
         indices_to_analyze = df_work[mask].index.tolist()
         total_items = len(indices_to_analyze)
         
         if progress:
-            progress(0.1, desc=f"🌐 Procesando {total_items} textos...")
+            progress(0.1, desc=f"Procesando {total_items} textos...")
         
-        # Inicializar columnas nuevas si no existen
         for col in ['text_translated', 'text_clean_en', 'sentimiento_en', 'emocion_en', 'sentimiento_score_en', 'emocion_score_en']:
             if col not in df_work.columns:
                 df_work[col] = None
         
-        # Crear analizadores una sola vez
         sentiment_analyzer_en = create_analyzer(task="sentiment", lang="en")
         emotion_analyzer_en = create_analyzer(task="emotion", lang="en")
         
-        # Procesar cada frase individualmente
         for count, idx in enumerate(indices_to_analyze):
             try:
-                # Verificar que el índice existe
                 if idx not in df_work.index:
-                    print(f"Índice {idx} no existe en el DataFrame")
                     continue
                 
                 original_text = df_work.at[idx, 'text']
                 
-                # Traducir
                 translated_text = traducir(original_text)
                 if translated_text is None or translated_text.strip() == '':
                     continue
                 
                 df_work.at[idx, 'text_translated'] = translated_text
                 
-                # Limpiar stopwords en inglés
-                clean_text_en = remove_stopwords_en(translated_text)
+                clean_text_en = remove_stopwords_language(translated_text, "english")
                 
-                # Verificar cantidad mínima de tokens
                 if len(clean_text_en.split()) < 4:
                     continue
                 
                 df_work.at[idx, 'text_clean_en'] = clean_text_en
                 
-                # Predecir sentimientos y emociones
                 sent_result = sentiment_analyzer_en.predict(clean_text_en)
                 emo_result = emotion_analyzer_en.predict(clean_text_en)
                 
@@ -645,7 +557,6 @@ def analyze_complementary_english(audioDF, progress=None):
                 df_work.at[idx, 'sentimiento_score_en'] = sent_result.probas
                 df_work.at[idx, 'emocion_score_en'] = emo_result.probas
                 
-                # Actualizar progreso
                 if progress:
                     progress_val = 0.1 + 0.8 * (count + 1) / total_items
                     progress(progress_val, desc=f"🌐 Procesando texto {count+1}/{total_items}...")
@@ -662,23 +573,19 @@ def analyze_complementary_english(audioDF, progress=None):
     except Exception as e:
         if progress:
             progress(0, desc=f"❌ Error en análisis complementario: {str(e)}")
-        print(f"Error general en análisis complementario en inglés: {e}")
         traceback.print_exc()
         return audioDF
 
 def analisis_baseGoEmotions_samlowe(text):
+    """
+    Análisis complementario con el modelo de GoEmotions de SamLowe
+    """
     try:
         if classifier is None:
-            print("Modelo roberta no disponible, usando 'neutral'")
             return 'neutral'
         
-        # El modelo devuelve una lista de diccionarios
         model_outputs = classifier(text)
-        
-        # Debug: ver qué devuelve el modelo
-        print(f"DEBUG roberta output: {model_outputs}")
-        
-        # Manejar diferentes formatos de respuesta
+
         if isinstance(model_outputs, list) and len(model_outputs) > 0:
             if isinstance(model_outputs[0], dict) and 'label' in model_outputs[0]:
                 return model_outputs[0]['label']
@@ -686,25 +593,21 @@ def analisis_baseGoEmotions_samlowe(text):
                 if isinstance(model_outputs[0][0], dict) and 'label' in model_outputs[0][0]:
                     return model_outputs[0][0]['label']
         
-        print(f"Formato inesperado de roberta: {type(model_outputs)}")
         return 'neutral'
         
     except Exception as e:
-        print(f"Error en análisis de emociones roberta: {e}")
         return 'neutral'
 
-# Mapping para agrupar emociones
 emotion_mapping = {
-    # anger group
     'anger': 'anger',
     'annoyance': 'anger',
     'disapproval': 'anger',
-    # disgust group
+
     'disgust': 'disgust',
-    # fear group
+
     'fear': 'fear',
     'nervousness': 'fear',
-    # joy group
+
     'admiration': 'joy',
     'amusement': 'joy',
     'approval': 'joy',
@@ -717,18 +620,18 @@ emotion_mapping = {
     'pride': 'joy',
     'optimism': 'joy',
     'relief': 'joy',
-    # sadness group
+
     'sadness': 'sadness',
     'disappointment': 'sadness',
     'embarrassment': 'sadness',
     'grief': 'sadness',
     'remorse': 'sadness',
-    # surprise group
+
     'confusion': 'surprise',
     'curiosity': 'surprise',
     'realization': 'surprise',
     'surprise': 'surprise',
-    # neutral group
+
     'neutral': 'neutral'
 }
 
@@ -740,28 +643,21 @@ def apply_roberta_analysis_and_replace(audioDF, progress=None):
         progress(0, desc="🤖 Iniciando análisis Roberta...")
     
     try:
-        # Trabajar con una copia
         df_work = audioDF.copy()
         
-        # Verificar si existe la columna text_translated
         if 'text_translated' not in df_work.columns:
             if progress:
-                progress(0.5, desc="⚠️ Sin textos traducidos, aplicando cambios básicos...")
-            print("No hay columna 'text_translated', saltando análisis roberta")
-            # Solo aplicar reemplazo básico de 'others' -> 'neutral'
+                progress(0.5, desc="Sin textos traducidos, aplicando cambios básicos...")
             df_work.loc[df_work["emocion"] == "others", "emocion"] = "neutral"
             if progress:
                 progress(1.0, desc="✅ Cambios básicos aplicados")
             return df_work
         
-        # Filtrar casos que tienen traducción (fueron procesados en inglés)
         mask_translated = df_work['text_translated'].notna()
         
         if not mask_translated.any():
             if progress:
                 progress(0.5, desc="⚠️ Sin textos para análisis Roberta...")
-            print("No hay textos traducidos para analizar con roberta")
-            # Solo aplicar reemplazo básico de 'others' -> 'neutral'
             df_work.loc[df_work["emocion"] == "others", "emocion"] = "neutral"
             if progress:
                 progress(1.0, desc="✅ Cambios básicos aplicados")
@@ -771,20 +667,15 @@ def apply_roberta_analysis_and_replace(audioDF, progress=None):
         total_items = len(indices_translated)
         
         if progress:
-            progress(0.1, desc=f"🤖 Procesando {total_items} textos con Roberta...")
-        
-        print(f"Aplicando análisis roberta a {len(indices_translated)} textos traducidos...")
-        
-        # Inicializar columnas si no existen
+            progress(0.1, desc=f"Procesando {total_items} textos con Roberta...")
+                
         if 'emotion_roberta' not in df_work.columns:
             df_work['emotion_roberta'] = None
         if 'sentiment_en_pysentimiento' not in df_work.columns:
             df_work['sentiment_en_pysentimiento'] = None
         
-        # Crear analizador de sentimientos en inglés
         sentiment_analyzer_en = create_analyzer(task="sentiment", lang="en")
         
-        # Procesar cada texto traducido
         for count, idx in enumerate(indices_translated):
             try:
                 translated_text = df_work.at[idx, 'text_translated']
@@ -793,38 +684,27 @@ def apply_roberta_analysis_and_replace(audioDF, progress=None):
                 if not translated_text or pd.isna(translated_text):
                     continue
                 
-                # Análisis de emociones con roberta
                 emotion_roberta = analisis_baseGoEmotions_samlowe(translated_text)
                 emotion_mapped = emotion_mapping.get(emotion_roberta, 'neutral')
                 df_work.at[idx, 'emotion_roberta'] = emotion_mapped
                 
-                # Análisis de sentimiento con pysentimiento en inglés
                 if clean_text_en and len(str(clean_text_en).strip()) > 0:
                     sentiment_en = sentiment_analyzer_en.predict(clean_text_en).output
                     df_work.at[idx, 'sentiment_en_pysentimiento'] = sentiment_en
                 else:
-                    # Si no hay texto limpio, usar el traducido
                     sentiment_en = sentiment_analyzer_en.predict(translated_text).output
                     df_work.at[idx, 'sentiment_en_pysentimiento'] = sentiment_en
                 
-                print(f"✓ Roberta análisis índice {idx}: emotion={emotion_mapped}, sentiment={sentiment_en}")
-                
-                # Actualizar progreso
                 if progress:
                     progress_val = 0.1 + 0.7 * (count + 1) / total_items
-                    progress(progress_val, desc=f"🤖 Procesando con Roberta {count+1}/{total_items}...")
+                    progress(progress_val, desc=f"Procesando con Roberta {count+1}/{total_items}...")
                 
             except Exception as e:
-                print(f"Error procesando índice {idx} con roberta: {e}")
                 continue
         
-        # Aplicar reemplazos condicionales
         if progress:
-            progress(0.9, desc="🔄 Aplicando reemplazos...")
-        
-        print("Aplicando reemplazos condicionales...")
-        
-        # Reemplazar sentimiento solo si es 'NEU' y hay análisis en inglés
+            progress(0.9, desc="Aplicando reemplazos...")
+                
         if 'sentiment_en_pysentimiento' in df_work.columns:
             mask_replace_sentiment = (
                 (df_work["sentimiento"] == "NEU") & 
@@ -832,7 +712,6 @@ def apply_roberta_analysis_and_replace(audioDF, progress=None):
             )
             df_work.loc[mask_replace_sentiment, "sentimiento"] = df_work.loc[mask_replace_sentiment, "sentiment_en_pysentimiento"]
         
-        # Reemplazar emoción solo si es 'others' y hay análisis roberta
         if 'emotion_roberta' in df_work.columns:
             mask_replace_emotion = (
                 (df_work["emocion"] == "others") & 
@@ -840,10 +719,7 @@ def apply_roberta_analysis_and_replace(audioDF, progress=None):
             )
             df_work.loc[mask_replace_emotion, "emocion"] = df_work.loc[mask_replace_emotion, "emotion_roberta"]
         
-        # Reemplazar 'others' restantes con 'neutral'
         df_work.loc[df_work["emocion"] == "others", "emocion"] = "neutral"
-        
-        print("✓ Reemplazos condicionales aplicados")
         
         if progress:
             progress(1.0, desc="✅ Análisis Roberta completado")
@@ -853,22 +729,19 @@ def apply_roberta_analysis_and_replace(audioDF, progress=None):
     except Exception as e:
         if progress:
             progress(0, desc=f"❌ Error en análisis Roberta: {str(e)}")
-        print(f"Error en apply_roberta_analysis_and_replace: {e}")
         traceback.print_exc()
-        # En caso de error, al menos aplicar el reemplazo básico
         audioDF.loc[audioDF["emocion"] == "others", "emocion"] = "neutral"
         return audioDF
 
 def generate_analysis_plots(audioDF, progress=None):
     """
-    Genera todos los gráficos de análisis con progress bar
+    Genera todos los gráficos de análisis
     """
     if progress:
-        progress(0, desc="📊 Iniciando generación de gráficos...")
+        progress(0, desc="Iniciando generación de gráficos...")
     
     try:
         
-        # Traducir las emociones
         df_plot = audioDF.copy()
         df_plot['emocion'] = df_plot['emocion'].replace({
             'joy': 'alegría',
@@ -879,7 +752,6 @@ def generate_analysis_plots(audioDF, progress=None):
             'anger': 'enojo'
         })
         
-        # Definir colores
         colores_sentimientos = {
             'POS': '#00A651',
             'NEG': '#F05A61',
@@ -899,9 +771,8 @@ def generate_analysis_plots(audioDF, progress=None):
         
         plot_files = []
         
-        # 1. Duración por orador
         if progress:
-            progress(0.05, desc="📊 Creando gráfico de duración por orador...")
+            progress(0.05, desc="Creando gráfico de duración por orador...")
         plt.figure(figsize=(10, 6))
         speaker_durations = df_plot.groupby('speaker')['duration'].sum()
         plt.bar(speaker_durations.index, speaker_durations.values)
@@ -914,9 +785,8 @@ def generate_analysis_plots(audioDF, progress=None):
         plot_files.append("duracion_orador.png")
         plt.close()
         
-        # 2. Distribución de sentimientos por orador
         if progress:
-            progress(0.15, desc="📊 Creando gráfico de sentimientos por orador...")
+            progress(0.15, desc="Creando gráfico de sentimientos por orador...")
         sentiment_durations = df_plot.groupby(["speaker", "sentimiento"])["duration"].sum().unstack(fill_value=0)
         sentiments_percentages = sentiment_durations.div(sentiment_durations.sum(axis=1), axis=0) * 100
         
@@ -936,9 +806,8 @@ def generate_analysis_plots(audioDF, progress=None):
         plot_files.append("sentimiento_orador.png")
         plt.close()
         
-        # 3. Distribución de emociones por orador
         if progress:
-            progress(0.25, desc="📊 Creando gráfico de emociones por orador...")
+            progress(0.25, desc="Creando gráfico de emociones por orador...")
         emotions_durations = df_plot.groupby(["speaker", "emocion"])["duration"].sum().unstack(fill_value=0)
         emotions_percentages = emotions_durations.div(emotions_durations.sum(axis=1), axis=0) * 100
         
@@ -958,9 +827,8 @@ def generate_analysis_plots(audioDF, progress=None):
         plot_files.append("emocion_orador.png")
         plt.close()
         
-        # 4. Pie chart sentimientos
         if progress:
-            progress(0.35, desc="📊 Creando gráfico circular de sentimientos...")
+            progress(0.35, desc="Creando gráfico circular de sentimientos...")
         sentiment_durations_total = df_plot.groupby("sentimiento")["duration"].sum()
         sentiment_percentages = (sentiment_durations_total / sentiment_durations_total.sum()) * 100
         colors = [colores_sentimientos.get(sent, "#CCCCCC") for sent in sentiment_percentages.index]
@@ -973,9 +841,8 @@ def generate_analysis_plots(audioDF, progress=None):
         plot_files.append("sentimiento_total.png")
         plt.close()
         
-        # 5. Pie chart emociones
         if progress:
-            progress(0.45, desc="📊 Creando gráfico circular de emociones...")
+            progress(0.45, desc="Creando gráfico circular de emociones...")
         emotions_durations_total = df_plot.groupby("emocion")["duration"].sum()
         emotions_percentages = (emotions_durations_total / emotions_durations_total.sum()) * 100
         colors = [colores_emociones.get(emo, "#CCCCCC") for emo in emotions_percentages.index]
@@ -988,9 +855,8 @@ def generate_analysis_plots(audioDF, progress=None):
         plot_files.append("emocion_total.png")
         plt.close()
         
-        # 6. Sentimiento a lo largo del tiempo por speaker
         if progress:
-            progress(0.55, desc="📊 Creando línea temporal de sentimientos por speaker...")
+            progress(0.55, desc="Creando línea temporal de sentimientos por speaker...")
         sentimiento_map = {'NEG': -1, 'NEU': 0, 'POS': 1}
         df_plot['sentimiento_num'] = df_plot['sentimiento'].map(sentimiento_map)
         df_plot['mid_time'] = (df_plot['start'] + df_plot['end']) / 2
@@ -1009,9 +875,8 @@ def generate_analysis_plots(audioDF, progress=None):
         plot_files.append("sentimiento_tiempo_speakers.png")
         plt.close()
         
-        # 7. Sentimiento a lo largo del tiempo general
         if progress:
-            progress(0.65, desc="📊 Creando línea temporal general de sentimientos...")
+            progress(0.65, desc="Creando línea temporal general de sentimientos...")
         plt.figure(figsize=(12, 4))
         sns.lineplot(data=df_plot.sort_values('mid_time'), x='mid_time', y='sentimiento_num', marker='o', color='black')
         plt.axhline(0, color='gray', linestyle='--', linewidth=1)
@@ -1025,9 +890,8 @@ def generate_analysis_plots(audioDF, progress=None):
         plot_files.append("sentimiento_tiempo.png")
         plt.close()
         
-        # 8. WordCloud
         if progress:
-            progress(0.75, desc="📊 Creando nube de palabras...")
+            progress(0.75, desc="Creando nube de palabras...")
         text = " ".join(df_plot['text_clean'].astype(str))
         if text.strip():
             wordcloud = WordCloud(width=800, height=400, background_color='white').generate(text)
@@ -1039,9 +903,8 @@ def generate_analysis_plots(audioDF, progress=None):
             plot_files.append("wordcloud.png")
             plt.close()
         
-        # 9. Palabras más frecuentes
         if progress:
-            progress(0.85, desc="📊 Creando gráfico de palabras frecuentes...")
+            progress(0.85, desc="Creando gráfico de palabras frecuentes...")
         text_lower = " ".join(df_plot['text_clean'].astype(str)).lower()
         words = re.findall(r'\b\w+\b', text_lower)
         word_counts = Counter(words)
@@ -1068,24 +931,23 @@ def generate_analysis_plots(audioDF, progress=None):
     except Exception as e:
         if progress:
             progress(0, desc=f"❌ Error generando gráficos: {str(e)}")
-        print(f"Error generando gráficos: {e}")
         return []
 
 def img_to_base64(img_path):
     with open(img_path, "rb") as img_file:
         return base64.b64encode(img_file.read()).decode("utf-8")
 
-# 🔹 Generador del reporte final
 def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="Informe_AS-EC.pdf"):
+    """
+    Genera el reporte final con reportlab
+    """
     try:
         
-        # Configurar documento con márgenes más amplios
         doc = SimpleDocTemplate(output_path, pagesize=A4, 
                               leftMargin=0.75*inch, rightMargin=0.75*inch,
                               topMargin=1*inch, bottomMargin=1*inch)
         styles = getSampleStyleSheet()
         
-        # Crear estilos personalizados
         title_style = ParagraphStyle('CustomTitle',
                                    parent=styles['Title'],
                                    fontSize=24,
@@ -1109,13 +971,11 @@ def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="Informe_AS-E
         
         story = []
         
-        # PORTADA
         story.append(Spacer(1, 2*inch))
         story.append(Paragraph("INFORME DE ANÁLISIS", title_style))
-        story.append(Paragraph("Sentimientos y Emociones en Audio", title_style))
+        story.append(Paragraph("Sentimientos y Emociones en Audio en Español", title_style))
         story.append(Spacer(1, 1*inch))
         
-        # Información del reporte
         info_data = [
             ["Fecha de generación:", time.strftime('%d/%m/%Y')],
             ["Hora:", time.strftime('%H:%M')],
@@ -1136,25 +996,20 @@ def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="Informe_AS-E
         story.append(info_table)
         story.append(PageBreak())
         
-        # RESUMEN EJECUTIVO
         story.append(Paragraph("RESUMEN EJECUTIVO", subtitle_style))
         
-        # Calcular estadísticas clave
         total_duracion = audioDF['duration'].sum()
         participantes = audioDF['speaker'].unique()
         sentiment_dist = audioDF.groupby('sentimiento')['duration'].sum()
         emotion_dist = audioDF.groupby('emocion')['duration'].sum()
         
-        # Participante más activo
         speaker_time = audioDF.groupby('speaker')['duration'].sum()
         most_active = speaker_time.idxmax()
         most_active_pct = (speaker_time.max() / total_duracion) * 100
         
-        # Sentimiento predominante
         main_sentiment = sentiment_dist.idxmax()
         main_sentiment_pct = (sentiment_dist.max() / total_duracion) * 100
         
-        # Emoción predominante
         main_emotion = emotion_dist.idxmax()
         main_emotion_pct = (emotion_dist.max() / total_duracion) * 100
         
@@ -1173,13 +1028,12 @@ def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="Informe_AS-E
         story.append(Paragraph(resumen_text, summary_style))
         story.append(Spacer(1, 20))
         
-        # TABLA DETALLADA DE PARTICIPANTES 
         story.append(Paragraph("ANÁLISIS POR PARTICIPANTE TOTAL", subtitle_style))
         
         participant_summary = audioDF.groupby('speaker').agg({
             'duration': ['sum', 'count'],
-            'sentimiento': lambda x: x.value_counts().index[0],  # más frecuente
-            'emocion': lambda x: x.value_counts().index[0]       # más frecuente
+            'sentimiento': lambda x: x.value_counts().index[0],  
+            'emocion': lambda x: x.value_counts().index[0]       
         }).round(1)
         
         participant_data = [["Participante", "Tiempo total (s)", "Intervenciones", "Sentimiento Principal", "Emoción Principal"]]
@@ -1214,14 +1068,13 @@ def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="Informe_AS-E
         
         story.append(participant_table)
         
-        # TABLA DETALLADA DE INTERVENCIONES
         story.append(Paragraph("ANÁLISIS POR INTERVENCIÓN", subtitle_style))
 
         intervencion_data = [["# Intervención", "Participante", "Duración (s)", "Sentimiento", "Emoción"]]
 
         for num_intervencion, (_, row) in enumerate(audioDF.iterrows(), start=1):
             intervencion_data.append([
-                str(num_intervencion),  # Numeración secuencial: 1, 2, 3, 4, 5, 6...
+                str(num_intervencion),
                 str(row['speaker']),
                 f"{row['duration']:.1f}",
                 str(row['sentimiento']),
@@ -1245,10 +1098,8 @@ def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="Informe_AS-E
         story.append(intervencion_table)
         story.append(PageBreak())
 
-        # GRÁFICOS ORGANIZADOS
         story.append(Paragraph("ANÁLISIS VISUAL", subtitle_style))
         
-        # Organizar gráficos por categorías
         graficos_organizados = [
             ("Análisis de Participación", ["duracion_orador.png"]),
             ("Distribución de Sentimientos", ["sentimiento_total.png", "sentimiento_orador.png"]),
@@ -1269,7 +1120,6 @@ def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="Informe_AS-E
             "palabras_frecuentes.png": "Palabras Más Frecuentes"
         }
         
-        # Crear diccionario de archivos disponibles
         available_plots = {}
         for plot_file in plot_files:
             if os.path.exists(plot_file):
@@ -1277,7 +1127,6 @@ def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="Informe_AS-E
                 available_plots[filename] = plot_file
         
         for categoria, archivos in graficos_organizados:
-            # Verificar si hay gráficos disponibles en esta categoría
             archivos_disponibles = [arch for arch in archivos if arch in available_plots]
             if not archivos_disponibles:
                 continue
@@ -1303,19 +1152,19 @@ def generar_reporte_pdf_reportlab(audioDF, plot_files, output_path="Informe_AS-E
                         story.append(img)
                         story.append(Spacer(1, 20))
                     except Exception as e:
-                        print(f"Error añadiendo {archivo}: {e}")
                         story.append(Paragraph(f"[Error cargando gráfico: {title}]", styles['Normal']))
                         story.append(Spacer(1, 10))
         
-        # Construir el documento
         doc.build(story)
         return output_path
         
     except Exception as e:
-        print(f"Error generando PDF: {e}")
         return None 
 
 def generar_reporte(analysis_data):
+    """
+    Genera el reporte PDF con la información que se le pasa como parámetro
+    """
     if analysis_data is None:
         return gr.update(visible=False)
     try:
@@ -1346,18 +1195,14 @@ def generate_csv_from_analysis(analysis_data):
         if not sentiment_data:
             return None, gr.update(value="❌ No hay datos de sentimientos para exportar")
         
-        # Ruta en la carpeta temporal con nombre fijo
         file_path = os.path.join(tempfile.gettempdir(), "Tabla_analisis_AS-EC.csv")
         
-        # Escribir CSV
         with open(file_path, mode='w', encoding='utf-8', newline='') as f:
             csv_writer = csv.writer(f, delimiter=',', quotechar='"', quoting=csv.QUOTE_ALL)
             
-            # Headers
             headers = ["Participante", "Texto_Original", "Texto_Limpio", "Sentimiento", "Emocion", "Duracion", "Confianza"]
             csv_writer.writerow(headers)
             
-            # Datos
             for row in sentiment_data:
                 csv_writer.writerow(row)
         
@@ -1368,8 +1213,6 @@ def generate_csv_from_analysis(analysis_data):
 
 def create_audio_analyzer_app():
     with gr.Blocks(theme=gr.themes.Soft(), title="Analizador de Audio Multi-Página") as demo:
-        
-        # CSS personalizado para mejor apariencia
         gr.HTML("""
         <style>
                 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -1386,8 +1229,7 @@ def create_audio_analyzer_app():
                     font-size: 14px !important;
                     font-weight: 400 !important;
                     line-height: 1.5 !important;
-                    color: #2d3748 !important;
-                    background-color: #ffffff !important;
+                    color: #ffffff !important;
                 }
                 
                 /* Labels más legibles */
@@ -1549,17 +1391,14 @@ def create_audio_analyzer_app():
         </style>
         """)
         
-        # Estado para controlar la página actual
         current_page = gr.State(value=1)
         
-        # Estados para almacenar datos entre páginas
         audio_data_state = gr.State()
         speakers_data_state = gr.State()
         final_analysis_state = gr.State()
         
-        # Indicador de progreso visual
         step_indicator = gr.HTML("""
-        <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
+        <div class="main-title"> Analizador de Sentimientos y Emociones en Audio en Español</div>
         <div class="step-indicator">
             <div class="step active">1. Carga de Audio</div>
             <div class="step pending">2. Transcripción e Identificación</div>
@@ -1567,7 +1406,6 @@ def create_audio_analyzer_app():
         </div>
         """)
         
-        # PÁGINA 1: Carga de Audio
         with gr.Column(visible=True, elem_classes=["page-container"]) as page1:
             gr.HTML('<h1 class="page-title">Carga y Procesamiento de Audio</h1>')
             with gr.Row():
@@ -1603,15 +1441,15 @@ def create_audio_analyzer_app():
                         with gr.Row():
                             model_selector = gr.Dropdown(
                                 choices=[
-                                    ("tiny (rápido, 39MB)", "tiny"),
-                                    ("base (equilibrado, 74MB)", "base"),
-                                    ("small (bueno, 244MB)", "small"), 
-                                    ("medium (alto, 769MB)", "medium"),
-                                    ("large (máximo, 1.5GB)", "large")
+                                    ("tiny (rápido)", "tiny"),
+                                    ("base (equilibrado)", "base"),
+                                    ("small (bueno)", "small"), 
+                                    ("medium (alto)", "medium"),
+                                    ("large (máximo)", "large")
                                 ],
                                 value="tiny",
                                 label="Tamaño del modelo",
-                                info="Modelos más grandes = mayor precisión pero más lento"
+                                info="Modelos más grandes = mayor precisión pero más lento y mayor consumo de recursos"
                             )
                             
                             change_model_btn = gr.Button(
@@ -1627,7 +1465,6 @@ def create_audio_analyzer_app():
                             lines=1
                         )
                         
-                        # Progress bar para cambio de modelo
                         model_progress = gr.Slider(
                             minimum=0,
                             maximum=100,
@@ -1664,20 +1501,18 @@ def create_audio_analyzer_app():
                 size="lg"
             )
             
-            # Progress bar visible bajo el botón "Procesar Audio" - SOLO UNO
             with gr.Column(visible=False, elem_classes=["progress-container"]) as progress_container:
-                gr.Markdown("### 📊 Progreso del Procesamiento")
+                gr.Markdown("### Progreso del Procesamiento")
                 progress_bar = gr.Slider(
                     minimum=0,
                     maximum=100,
                     value=0,
                     step=1,
-                    label="🚀 Iniciando...",
+                    label="Iniciando...",
                     interactive=False,
                     show_label=True
                 )
         
-        # PÁGINA 2: Identificación de Participantes
         with gr.Column(visible=False, elem_classes=["page-container"]) as page2:
             gr.HTML('<h1 class="page-title">Transcripción completada</h1>')
             
@@ -1698,7 +1533,6 @@ def create_audio_analyzer_app():
             Esto mejorará significativamente la legibilidad del análisis final.
             """)
             
-            # Contenedor dinámico para speakers # ACA
             speaker_audio_1 = gr.Audio(label="Muestra Speaker 1", visible=False, interactive=False)
             speaker_name_1 = gr.Textbox(label="Nombre para Speaker 1", visible=False, interactive=True)
             speaker_audio_2 = gr.Audio(label="Muestra Speaker 2", visible=False, interactive=False)  
@@ -1720,20 +1554,18 @@ def create_audio_analyzer_app():
                     size="lg"
                 )
             
-            # Progress bar para página 2 - SOLO UNO
             with gr.Column(visible=False, elem_classes=["progress-container"]) as progress2_container:
-                gr.Markdown("### 📊 Progreso del Análisis")
+                gr.Markdown("### Progreso del Análisis")
                 progress2_bar = gr.Slider(
                     minimum=0,
                     maximum=100,
                     value=0,
                     step=1,
-                    label="🔍 Esperando...",
+                    label="Esperando...",
                     interactive=False,
                     show_label=True
                 )
         
-        # PÁGINA 3: Resultados Finales
         with gr.Column(visible=False, elem_classes=["page-container"]) as page3:
             gr.HTML('<h1 class="page-title">Resultados del Análisis</h1>')
             
@@ -1748,14 +1580,12 @@ def create_audio_analyzer_app():
                 with gr.TabItem("Tabla de Análisis"):
                     gr.Markdown("### Datos detallados del análisis")
                     
-                    # Botón para descargar CSV
                     download_csv_btn = gr.Button(
                         "Descargar Tabla como CSV",
                         variant="primary",
                         size="lg"
                     )
                     
-                    # Archivo descargable
                     csv_download_file = gr.File(
                         label="Descargar CSV",
                         interactive=True,
@@ -1769,23 +1599,19 @@ def create_audio_analyzer_app():
                     )
                 
                 with gr.TabItem("Gráficos"):
-                    # Fila 1: Gráficos de duración y sentimientos por orador
                     with gr.Row(equal_height=True):
                         plot_duration = gr.Image(label="Duración por Orador", visible=False, height=400)
                         plot_sentiment_orador = gr.Image(label="Sentimientos por Orador", visible=False, height=400)
                         plot_emotion_orador = gr.Image(label="Emociones por Orador", visible=False, height=400)
                     
-                    # Fila 2: Gráficos de torta (distribuciones totales)
                     with gr.Row(equal_height=True):
                         plot_sentiment_dist = gr.Image(label="Distribución Total de Sentimientos", visible=False, height=400)
                         plot_emotion_dist = gr.Image(label="Distribución Total de Emociones", visible=False, height=400)
                     
-                    # Fila 3: Líneas de tiempo
                     with gr.Row(equal_height=True):
                         plot_timeline = gr.Image(label="Evolución del Sentimiento", visible=False, height=400)
                         plot_timeline_speakers = gr.Image(label="Sentimientos por Participante en el Tiempo", visible=False, height=400)
                     
-                    # Fila 4: Análisis de texto
                     with gr.Row(equal_height=True):
                         plot_wordcloud = gr.Image(label="Nube de Palabras", visible=False, height=400)
                         plot_frequency = gr.Image(label="Palabras Más Frecuentes", visible=False, height=400)
@@ -1815,41 +1641,35 @@ def create_audio_analyzer_app():
                     variant="secondary"
                 )
         
-        # FUNCIONES DE NAVEGACIÓN Y PROCESAMIENTO
-        
         def process_audio_with_progress(audio, speakers, language, remove_stopwords, min_tokens, progress=gr.Progress()):
             """Procesa el audio con barra de progreso visible usando el streaming function"""
             if audio is None:
                 gr.Warning("Por favor, suba un archivo de audio")
                 return [
-                    gr.update(visible=False),  # progress_container
+                    gr.update(visible=False),  
                     gr.update(value=0, label="❌ Error: No se subió audio", interactive=False),        
-                    None, None, None           # states
+                    None, None, None
                 ]
             
             try:
-                # Mostrar progress container
                 yield [
-                    gr.update(visible=True),   # progress_container visible
-                    gr.update(value=5, label="🚀 Iniciando procesamiento...", interactive=False),
+                    gr.update(visible=True),
+                    gr.update(value=5, label="Iniciando procesamiento...", interactive=False),
                     None, None, None
                 ]
                 
-                # Usar la función de streaming mejorada para transcripción
                 groupedDF = transcribe_with_whisperx_stream(audio, speakers, progress)
                 
                 yield [
                     gr.update(visible=True),
-                    gr.update(value=80, label="🎤 Extrayendo muestras de voz...", interactive=False),
+                    gr.update(value=80, label="Extrayendo muestras de voz...", interactive=False),
                     None, None, None
                 ]
                 
-                # Paso 2: Extracción de muestras
-                progress(0.8, desc="🎤 Extrayendo muestras de voz...")
+                progress(0.8, desc="Extrayendo muestras de voz...")
                 orators, speaker_files = extract_speaker_samples(current_audioDF, audio)
                 
-                # Paso 3: Preparación de resultados
-                progress(0.9, desc="📝 Preparando resultados...")
+                progress(0.9, desc="Preparando resultados...")
                 transcript_text = "\n".join([
                     f"{row['speaker']}: {row['text'][:100]}..."
                     for _, row in groupedDF.iterrows()
@@ -1860,9 +1680,8 @@ def create_audio_analyzer_app():
                 
                 progress(1.0, desc="✅ ¡Procesamiento completado!")
                 
-                # Resultado final
                 yield [
-                    gr.update(visible=False),  # hide progress
+                    gr.update(visible=False),
                     gr.update(value=100, label="✅ ¡Procesamiento completado!", interactive=False),
                     gr.update(value=transcript_text),
                     gr.update(value=speakers_text),
@@ -1883,41 +1702,39 @@ def create_audio_analyzer_app():
             """Navega a página 2 y configura speakers"""
             if audio_data is None:
                 return [
-                    gr.update(value=1),  # current_page
+                    gr.update(value=1),  
                     gr.update(visible=True), gr.update(visible=False), gr.update(visible=False),
                     gr.update(value="<div>...step indicator...</div>"),
-                    # Ocultar todos los speakers
-                    gr.update(visible=False), gr.update(visible=False),  # speaker 1
-                    gr.update(visible=False), gr.update(visible=False),  # speaker 2
-                    gr.update(visible=False), gr.update(visible=False),  # speaker 3
-                    gr.update(visible=False), gr.update(visible=False),  # speaker 4
-                    gr.update(visible=False), gr.update(visible=False)   # speaker 5
+                    gr.update(visible=False), gr.update(visible=False),  
+                    gr.update(visible=False), gr.update(visible=False),  
+                    gr.update(visible=False), gr.update(visible=False), 
+                    gr.update(visible=False), gr.update(visible=False),  
+                    gr.update(visible=False), gr.update(visible=False)
                 ]
             
             speakers = audio_data.get("speakers", [])
             speaker_files = audio_data.get("speaker_files", {})
             
-            # Configurar updates para cada speaker (máximo 5)
             speaker_updates = []
-            for i in range(5): # ACA
+            for i in range(5):
                 if i < len(speakers):
                     speaker = speakers[i]
                     audio_file = speaker_files.get(speaker, None)
                     speaker_updates.extend([
-                        gr.update(visible=True, value=audio_file, label=f"Muestra {speaker}"),  # audio
-                        gr.update(visible=True, label=f"Nombre para {speaker}", interactive=True)  # textbox
+                        gr.update(visible=True, value=audio_file, label=f"Muestra {speaker}"),
+                        gr.update(visible=True, label=f"Nombre para {speaker}", interactive=True)
                     ])
                 else:
                     speaker_updates.extend([
-                        gr.update(visible=False),  # audio oculto
-                        gr.update(visible=False, interactive=True) # textbox oculto
+                        gr.update(visible=False),
+                        gr.update(visible=False, interactive=True)
                     ])
             
             return [
-                gr.update(value=2),  # current_page
-                gr.update(visible=False), gr.update(visible=True), gr.update(visible=False),  # páginas
+                gr.update(value=2),
+                gr.update(visible=False), gr.update(visible=True), gr.update(visible=False),
                 gr.update(value="""
-                <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
+                <div class="main-title"> Analizador de Sentimientos y Emociones en Audio en Español</div>
                 <div class="step-indicator">
                     <div class="step completed">1. Carga de Audio</div>
                     <div class="step active">2. Transcripción e Identificación</div>
@@ -1933,82 +1750,77 @@ def create_audio_analyzer_app():
             if audio_data is None:
                 gr.Warning("No hay datos de audio para analizar")
                 return [
-                    gr.update(visible=False), # progress2_container
+                    gr.update(visible=False),
                     gr.update(value=0, label="❌ Error: No hay datos", interactive=False), 
                     None
                 ]
             
             try:
-                # Mostrar progress container
                 yield [
-                    gr.update(visible=True),   # progress2_container visible
-                    gr.update(value=5, label="🚀 Iniciando análisis completo...", interactive=False),
+                    gr.update(visible=True),
+                    gr.update(value=5, label="Iniciando análisis completo...", interactive=False),
                     None
                 ]
                 
-                # Obtener datos reales
                 groupedDF = audio_data["grouped_df"]
                 speakers = audio_data["speakers"]
                 
-                # Crear diccionario de nombres
                 names = [name1, name2, name3, name4, name5]
                 orator_names = {}
                 for i, speaker in enumerate(speakers):
                     if i < len(names) and names[i] and names[i].strip():
                         orator_names[speaker] = names[i].strip()
                 
-                progress(0.05, desc="👥 Aplicando nombres de participantes...")
+                progress(0.05, desc="Aplicando nombres de participantes...")
                 yield [
                     gr.update(visible=True),
-                    gr.update(value=10, label="👥 Aplicando nombres de participantes...", interactive=False),
+                    gr.update(value=10, label="Aplicando nombres de participantes...", interactive=False),
                     None
                 ]
                 
-                # Usar funciones reales con progress
                 updated_audioDF = update_speaker_names(current_audioDF, orator_names)
                 groupedDF = group_consecutive_speakers(updated_audioDF)
                 
-                progress(0.1, desc="🔍 Aplicando filtros de texto...")
+                progress(0.1, desc="Aplicando filtros de texto...")
                 yield [
                     gr.update(visible=True),
-                    gr.update(value=15, label="🔍 Aplicando filtros de texto...", interactive=False),
+                    gr.update(value=15, label="Aplicando filtros de texto...", interactive=False),
                     None
                 ]
                 filtered_audioDF = apply_text_filters(groupedDF.copy(), remove_stopwords=True, min_tokens=4)
                 
-                progress(0.15, desc="🧠 Iniciando análisis de sentimientos...")
+                progress(0.15, desc="Iniciando análisis de sentimientos...")
                 yield [
                     gr.update(visible=True),
-                    gr.update(value=20, label="🧠 Analizando sentimientos y emociones...", interactive=False),
+                    gr.update(value=20, label="Analizando sentimientos y emociones...", interactive=False),
                     None
                 ]
                 filtered_audioDF = analyze_sentiments(filtered_audioDF, "es", progress)
                 
                 yield [
                     gr.update(visible=True),
-                    gr.update(value=50, label="🌐 Análisis complementario en inglés...", interactive=False),
+                    gr.update(value=50, label="Análisis complementario en inglés...", interactive=False),
                     None
                 ]
                 filtered_audioDF = analyze_complementary_english(filtered_audioDF, progress)
                 
                 yield [
                     gr.update(visible=True),
-                    gr.update(value=70, label="🤖 Análisis avanzado con Roberta...", interactive=False),
+                    gr.update(value=70, label="Análisis avanzado con Roberta...", interactive=False),
                     None
                 ]
                 filtered_audioDF = apply_roberta_analysis_and_replace(filtered_audioDF, progress)
                 
-                progress(0.8, desc="📊 Generando visualizaciones...")
+                progress(0.8, desc="Generando visualizaciones...")
                 yield [
                     gr.update(visible=True),
-                    gr.update(value=85, label="📊 Generando gráficos y visualizaciones...", interactive=False),
+                    gr.update(value=85, label="Generando gráficos y visualizaciones...", interactive=False),
                     None
                 ]
                 plot_files = generate_analysis_plots(filtered_audioDF, progress)
                 
                 progress(1.0, desc="✅ ¡Análisis completo finalizado!")
                 
-                # Preparar datos finales
                 analysis_data = {
                     "filtered_audioDF": filtered_audioDF,
                     "plot_files": plot_files,
@@ -2016,20 +1828,15 @@ def create_audio_analyzer_app():
                     "sentiment_data": []
                 }
                 
-                # Preparar tabla de sentimientos
                 for _, row in filtered_audioDF.iterrows():
                     if row['text_clean'].strip():
-                        # Texto original (con stopwords)
                         texto_original = row['text']
                         
-                        # Texto limpio (sin stopwords) 
                         texto_limpio = row['text_clean']
                         
-                        # Duración del segmento
                         duracion = f"{row['duration']:.1f}s"
                         
-                        # Confianza (placeholder basado en scores si existen)
-                        confianza = "85%"  # placeholder por defecto
+                        confianza = "85%" 
                         if 'sentimiento_score' in row and row['sentimiento_score']:
                             try:
                                 max_score = max(row['sentimiento_score'].values())
@@ -2047,9 +1854,8 @@ def create_audio_analyzer_app():
                             confianza
                         ])
                 
-                # Resultado final
                 yield [
-                    gr.update(visible=False),  # hide progress
+                    gr.update(visible=False),
                     gr.update(value=100, label="✅ ¡Análisis completado exitosamente!", interactive=False),
                     analysis_data
                 ]
@@ -2072,54 +1878,41 @@ def create_audio_analyzer_app():
                     gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update() 
                     ]
             
-            # Mapear archivos PNG específicos a componentes específicos
             plot_files = analysis_data.get("plot_files", [])
             
-            # Crear diccionario de archivos por nombre
             plot_dict = {}
             for plot_file in plot_files:
                 if os.path.exists(plot_file):
                     filename = os.path.basename(plot_file)
                     plot_dict[filename] = plot_file
             
-            # Mapear cada componente a su archivo correspondiente
             plot_updates = [
-                # plot_duration
                 gr.update(value=plot_dict.get("duracion_orador.png"), visible="duracion_orador.png" in plot_dict),
-                # plot_sentiment_orador  
                 gr.update(value=plot_dict.get("sentimiento_orador.png"), visible="sentimiento_orador.png" in plot_dict),
-                # plot_emotion_orador
                 gr.update(value=plot_dict.get("emocion_orador.png"), visible="emocion_orador.png" in plot_dict),
-                # plot_sentiment_dist
                 gr.update(value=plot_dict.get("sentimiento_total.png"), visible="sentimiento_total.png" in plot_dict),
-                # plot_emotion_dist
                 gr.update(value=plot_dict.get("emocion_total.png"), visible="emocion_total.png" in plot_dict),
-                # plot_timeline
                 gr.update(value=plot_dict.get("sentimiento_tiempo.png"), visible="sentimiento_tiempo.png" in plot_dict),
-                # plot_timeline_speakers
                 gr.update(value=plot_dict.get("sentimiento_tiempo_speakers.png"), visible="sentimiento_tiempo_speakers.png" in plot_dict),
-                # plot_wordcloud
                 gr.update(value=plot_dict.get("wordcloud.png"), visible="wordcloud.png" in plot_dict),
-                # plot_frequency
                 gr.update(value=plot_dict.get("palabras_frecuentes.png"), visible="palabras_frecuentes.png" in plot_dict)
             ]
             
             return [
-                gr.update(value=3),  # current_page
-                gr.update(visible=False), gr.update(visible=False), gr.update(visible=True),  # páginas
+                gr.update(value=3),
+                gr.update(visible=False), gr.update(visible=False), gr.update(visible=True),
                 gr.update(value="""
-                    <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
+                    <div class="main-title"> Analizador de Sentimientos y Emociones en Audio en Español</div>
                     <div class="step-indicator">
                     <div class="step completed">1. Carga de Audio</div>
                     <div class="step completed">2. Transcripción e Identificación</div>
                     <div class="step active">3. Resultados</div>
                 </div>"""),
-                gr.update(value=analysis_data.get("transcript", "")),  # final_transcript
-                gr.update(value=analysis_data.get("sentiment_data", [])),  # sentiment_table
-                gr.update(visible=False)  # csv_download_file (inicialmente oculto)                
+                gr.update(value=analysis_data.get("transcript", "")),
+                gr.update(value=analysis_data.get("sentiment_data", [])),
+                gr.update(visible=False)
             ] + plot_updates
         
-        # EVENTOS DE LA APLICACIÓN
         
         change_model_btn.click(
             fn=change_model_with_progress,
@@ -2127,7 +1920,6 @@ def create_audio_analyzer_app():
             outputs=[model_progress, model_progress, model_status, current_config_display]
         )
 
-        # Procesar audio con progress bar visible
         process_btn.click(
             fn=process_audio_with_progress,
             inputs=[audio_input, speakers_input, language_input, remove_stopwords_input, min_tokens_input],
@@ -2151,7 +1943,6 @@ def create_audio_analyzer_app():
             ]
         )
         
-        # Realizar análisis completo con progress bar
         analyze_btn.click(
             fn=perform_complete_analysis,
             inputs=[audio_data_state, speaker_name_1, speaker_name_2, speaker_name_3, speaker_name_4, speaker_name_5],
@@ -2169,13 +1960,12 @@ def create_audio_analyzer_app():
             ]
         )
         
-        # Botones de navegación
         back_to_page1_btn.click(
             fn=lambda: [
                 gr.update(value=1),
                 gr.update(visible=True), gr.update(visible=False), gr.update(visible=False),
                 gr.update(value="""
-                <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
+                <div class="main-title"> Analizador de Sentimientos y Emociones en Audio en Español</div>
                 <div class="step-indicator">
                     <div class="step active">1. Carga de Audio</div>
                     <div class="step pending">2. Transcripción e Identificación</div>
@@ -2191,7 +1981,7 @@ def create_audio_analyzer_app():
                 gr.update(value=2),
                 gr.update(visible=False), gr.update(visible=True), gr.update(visible=False),
                 gr.update(value="""
-                <div class="main-title"> Analizador de Sentimientos y Emociones en Audio</div>
+                <div class="main-title"> Analizador de Sentimientos y Emociones en Audio en Español</div>
                 <div class="step-indicator">
                     <div class="step completed">1. Carga de Audio</div>
                     <div class="step active">2. Transcripción e Identificación</div>
@@ -2207,12 +1997,11 @@ def create_audio_analyzer_app():
             outputs=[
                 current_page, page1, page2, page3, step_indicator,
                 audio_input,
-                model_status, current_config_display,  # Añadir nuevos componentes
+                model_status, current_config_display,
                 audio_data_state, speakers_data_state, final_analysis_state
             ]
         )
         
-        # Generar reporte PDF
         generate_report_btn.click(
             fn=generar_reporte,
             inputs=[final_analysis_state],
@@ -2231,7 +2020,6 @@ def create_audio_analyzer_app():
     
     return demo
 
-# Lanzar la aplicación
 if __name__ == "__main__":
     demo = create_audio_analyzer_app()
     demo.queue()
